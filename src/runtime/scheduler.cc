@@ -20,6 +20,13 @@ size_t Scheduler::register_queue(std::unique_ptr<WorkQueue> queue) {
     return idx;
 }
 
+WorkQueue* Scheduler::get_queue(size_t idx) const {
+    if (idx < queues_.size()) {
+        return queues_[idx].get();
+    }
+    return nullptr;
+}
+
 void Scheduler::run() {
     running_.store(true, std::memory_order_release);
     constexpr size_t kMaxBatchSize = 64;

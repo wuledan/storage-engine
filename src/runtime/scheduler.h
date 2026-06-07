@@ -15,6 +15,7 @@ public:
     Scheduler(SchedulingPolicy* policy, AdaptiveIdle* idle);
 
     size_t register_queue(std::unique_ptr<WorkQueue> queue);
+    WorkQueue* get_queue(size_t idx) const;
 
     void run();
     void request_stop();

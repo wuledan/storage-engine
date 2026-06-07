@@ -10,6 +10,7 @@ public:
     explicit LocalWorkQueue(QueueType type, Priority priority, std::string name,
                             size_t capacity = 1024);
 
+    bool try_enqueue(WorkItem item) noexcept;
     bool try_dequeue(WorkItem& item) noexcept override;
     size_t try_dequeue_batch(WorkItem* items, size_t max_count) noexcept override;
     size_t approx_count() const noexcept override;
