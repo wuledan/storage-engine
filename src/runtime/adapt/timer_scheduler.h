@@ -24,7 +24,7 @@
 #include <thread>
 #include <unordered_map>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 class WorkStealingExecutor;
 

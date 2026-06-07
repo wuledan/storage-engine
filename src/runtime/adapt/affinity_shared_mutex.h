@@ -21,7 +21,7 @@
 // Forward-declare folly::coro::Task for co_scoped_lock() return types.
 namespace folly::coro { template<typename T> class Task; }
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 class WorkStealingExecutor;
 

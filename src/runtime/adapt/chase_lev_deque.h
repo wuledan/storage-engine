@@ -7,7 +7,7 @@
 #include <optional>
 #include <vector>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // Circular array for Chase-Lev deque.
 // Indices wrap via modulo; capacity must be a power of two for correctness

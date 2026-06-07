@@ -14,7 +14,7 @@
 #include <cstdlib>
 #include <random>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Thread-local worker identity ──
 

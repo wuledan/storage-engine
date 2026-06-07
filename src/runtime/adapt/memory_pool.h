@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Small object cache config ──
 struct SmallObjectConfig {

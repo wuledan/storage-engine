@@ -17,7 +17,7 @@
 
 #include <folly/coro/Task.h>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 size_t AffinitySharedMutex::current_worker_id() {
     return detail::get_current_worker_id();

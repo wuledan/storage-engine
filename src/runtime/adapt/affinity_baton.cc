@@ -8,7 +8,7 @@
 #include "cpp/quant/infra/affinity_baton.h"
 #include "cpp/quant/infra/work_stealing_executor.h"
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Worker ID resolution ──
 //

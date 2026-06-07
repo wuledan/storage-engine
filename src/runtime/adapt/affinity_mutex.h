@@ -22,7 +22,7 @@
 // Full definition is in <folly/coro/Task.h>, included via coroutine.h in the .cc.
 namespace folly::coro { template<typename T> class Task; }
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 class WorkStealingExecutor;
 

@@ -15,7 +15,7 @@
 #include <future>
 #include <utility>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Construction / destruction ──
 

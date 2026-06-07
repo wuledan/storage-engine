@@ -11,7 +11,7 @@
 #include "cpp/quant/infra/affinity_mutex.h"
 #include "cpp/quant/infra/coroutine.h"
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Size class calculation ──
 // Size classes: 8, 16, 32, 64, 128, 256 bytes

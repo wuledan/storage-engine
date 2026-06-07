@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ============================================================
 // Timestamp implementation

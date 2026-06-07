@@ -23,7 +23,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 class StatRegistry {
 public:

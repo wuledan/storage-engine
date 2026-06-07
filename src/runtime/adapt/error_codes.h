@@ -11,7 +11,7 @@
 #include <system_error>
 #include <type_traits>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Error code segments ──
 // 0x00XX0000 — Infrastructure layer

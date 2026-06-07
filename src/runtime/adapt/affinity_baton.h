@@ -14,7 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 class WorkStealingExecutor;
 

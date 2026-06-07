@@ -30,7 +30,7 @@
 
 #include <hwloc.h>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── WorkStealingExecutor ──
 //

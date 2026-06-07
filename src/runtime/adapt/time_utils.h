@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Nanosecond-precision timestamp ──
 class Timestamp {

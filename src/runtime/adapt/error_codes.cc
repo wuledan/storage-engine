@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <system_error>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── QuantErrorCategory message mapping ──
 std::string QuantErrorCategory::message(int code) const {

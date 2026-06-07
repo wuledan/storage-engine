@@ -10,7 +10,7 @@
 
 #include <folly/coro/Task.h>
 
-namespace storage { namespace runtime { namespace adapt {
+namespace storage::runtime::adapt {
 
 // ── Worker ID resolution ──
 // Reuses the same mechanism as AffinityBaton (detail::get_current_worker_id).
