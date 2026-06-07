@@ -1,7 +1,6 @@
 #include "worker.h"
 #include "policy_factory.h"
-#include <pthread.h>
-#include <sched.h>
+#include <hwloc.h>
 
 namespace storage::runtime {
 
@@ -29,10 +28,14 @@ void Worker::start() {
         worker_loop();
     });
     if (cfg_.cpu_id > 0) {
-        cpu_set_t cpuset;
-        CPU_ZERO(&cpuset);
-        CPU_SET(cfg_.cpu_id - 1, &cpuset);
-        pthread_setaffinity_np(thread_.native_handle(), sizeof(cpu_set_t), &cpuset);
+        hwloc_topology_t topo;
+        hwloc_topology_init(&topo);
+        hwloc_topology_load(topo);
+        hwloc_cpuset_t cpuset = hwloc_bitmap_alloc();
+        hwloc_bitmap_set(cpuset, cfg_.cpu_id - 1);
+        hwloc_set_cpubind(topo, cpuset, HWLOC_CPUBIND_THREAD);
+        hwloc_bitmap_free(cpuset);
+        hwloc_topology_destroy(topo);
     }
 }
 
