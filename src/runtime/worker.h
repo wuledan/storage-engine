@@ -29,8 +29,6 @@ public:
     };
 
     explicit Worker(Config cfg);
-    Worker(Worker&&) = default;
-    Worker& operator=(Worker&&) = default;
 
     size_t add_queue(std::unique_ptr<WorkQueue> q);
     void set_policy(std::unique_ptr<SchedulingPolicy> p);
