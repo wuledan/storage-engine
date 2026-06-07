@@ -19,10 +19,12 @@ size_t Worker::add_queue(std::unique_ptr<WorkQueue> q) {
 }
 
 void Worker::set_policy(std::unique_ptr<SchedulingPolicy> p) {
+    scheduler_.set_policy(p.get());
     policy_ = std::move(p);
 }
 
 void Worker::start() {
+    scheduler_.reset_stop();
     thread_ = std::thread([this] {
         worker_loop();
     });

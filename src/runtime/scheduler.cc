@@ -28,7 +28,17 @@ WorkQueue* Scheduler::get_queue(size_t idx) const {
 }
 
 void Scheduler::run() {
+    // Signal we're running, then check if stop was already requested.
+    // Must NOT reset stop_requested_ here — doing so would undo a stop
+    // that was already signaled before we started, causing the worker
+    // thread to run forever in its loop (nobody calls request_stop again).
     running_.store(true, std::memory_order_release);
+    if (stop_requested_.load(std::memory_order_acquire)) {
+        running_.store(false, std::memory_order_release);
+        if (idle_) idle_->notify();
+        return;
+    }
+
     constexpr size_t kMaxBatchSize = 64;
 
     std::vector<QueueSnapshot> snapshots;
@@ -77,6 +87,7 @@ void Scheduler::run() {
 }
 
 void Scheduler::request_stop() {
+    stop_requested_.store(true, std::memory_order_release);
     running_.store(false, std::memory_order_release);
     if (idle_) idle_->notify();
 }

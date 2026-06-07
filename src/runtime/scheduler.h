@@ -20,6 +20,9 @@ public:
     void run();
     void request_stop();
 
+    void set_policy(SchedulingPolicy* policy) noexcept { policy_ = policy; }
+    void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
+
     const SchedulerStats& stats() const noexcept { return stats_; }
     void reset_stats() noexcept { stats_ = SchedulerStats{}; }
 
@@ -28,6 +31,7 @@ private:
     SchedulingPolicy* policy_;
     AdaptiveIdle* idle_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> stop_requested_{false};
     SchedulerStats stats_;
     std::vector<uint64_t> last_poll_times_;
     std::vector<uint64_t> total_dequeued_;

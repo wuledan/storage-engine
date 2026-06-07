@@ -14,6 +14,8 @@ public:
 
 private:
     // 队列索引（在构造函数中注册）
+    // protected 以允许测试子类访问
+protected:
     size_t idx_engine_{0};
     size_t idx_net_io_{0};
     size_t idx_disk_io_{0};

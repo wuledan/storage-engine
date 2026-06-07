@@ -40,6 +40,10 @@ void AdaptiveIdle::idle_spin() {
         // 检查是否有 notify
         uint64_t val;
         if (::read(event_fd_, &val, sizeof(val)) > 0) {
+            // Do NOT clear pending_notify_ here - the park phase needs it
+            // to detect that a notification arrived (even though the eventfd
+            // data was consumed here), preventing a park-phase hang when
+            // request_stop() fires before the scheduler reaches idle_park().
             level_.store(IdleLevel::kActive, std::memory_order_release);
             return;
         }
@@ -51,6 +55,9 @@ void AdaptiveIdle::idle_yield() {
     for (uint32_t i = 0; i < cfg_.yield_rounds; ++i) {
         uint64_t val;
         if (::read(event_fd_, &val, sizeof(val)) > 0) {
+            // Do NOT clear pending_notify_ here - the park phase needs it
+            // to detect that a notification arrived (even though the eventfd
+            // data was consumed here).
             level_.store(IdleLevel::kActive, std::memory_order_release);
             return;
         }
@@ -60,9 +67,10 @@ void AdaptiveIdle::idle_yield() {
 
 void AdaptiveIdle::idle_park() {
     std::unique_lock lock(park_mutex_);
-    // 丢失唤醒防护：持有锁后重新检查
+    // 丢失唤醒防护：持有锁后检查 pending_notify_ 和 eventfd
     uint64_t val;
-    if (::read(event_fd_, &val, sizeof(val)) > 0) {
+    if (pending_notify_.exchange(false, std::memory_order_acq_rel) ||
+        ::read(event_fd_, &val, sizeof(val)) > 0) {
         level_.store(IdleLevel::kActive, std::memory_order_release);
         return;
     }
@@ -75,13 +83,24 @@ void AdaptiveIdle::idle_park() {
 }
 
 void AdaptiveIdle::notify() {
-    // 写 eventfd 唤醒 SPIN/YIELD 阶段
+    // Lock the park mutex to synchronize with idle_park().
+    // This prevents the race where:
+    //   idle_park: checks pending_notify_ (false)
+    //   notify:    sets pending_notify_ = true
+    //   idle_park: captures park_generation_ (already incremented by notify)
+    //   idle_park: CV wait predicate checks park_generation_ != gen → false → BLOCKS
+    {
+        std::lock_guard<std::mutex> lock(park_mutex_);
+        pending_notify_.store(true, std::memory_order_release);
+        park_generation_.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    // 写 eventfd 唤醒 SPIN/YIELD 阶段 (no mutex needed, eventfd is atomic)
     uint64_t val = 1;
     ssize_t written = ::write(event_fd_, &val, sizeof(val));
-    (void)written;  // eventfd 写入几乎不会失败，忽略返回值
+    (void)written;
 
-    // 唤醒 PARK 阶段
-    park_generation_.fetch_add(1, std::memory_order_acq_rel);
+    // Notify CV outside the mutex (best practice for CV notification)
     park_cv_.notify_one();
 }
 

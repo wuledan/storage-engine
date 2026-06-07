@@ -48,6 +48,9 @@ private:
     std::condition_variable park_cv_;
     std::atomic<IdleLevel> level_{IdleLevel::kActive};
     std::atomic<uint64_t> park_generation_{0};
+    // Separate flag to track notification that may have been consumed
+    // by spin/yield phases before park could observe it
+    std::atomic<bool> pending_notify_{false};
 };
 
 }  // namespace storage::runtime

@@ -1,0 +1,5 @@
+if(EXISTS "/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_adaptive_idle[1]_tests.cmake")
+  include("/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_adaptive_idle[1]_tests.cmake")
+else()
+  add_test(test_adaptive_idle_NOT_BUILT test_adaptive_idle_NOT_BUILT)
+endif()

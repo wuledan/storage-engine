@@ -23,7 +23,7 @@ public:
     struct Config {
         uint32_t cpu_id{0};
         uint32_t numa_node{0};
-        PolicyConfig policy_cfg;
+        PolicyConfig policy_cfg{"strict_priority", {}, 64};
         AdaptiveIdle::Config idle_cfg;
         size_t max_batch_size{64};
     };

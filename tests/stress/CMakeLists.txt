@@ -1,1 +1,26 @@
-# Stress tests placeholder
+# ---------------------------------------------------------------------------
+# Stress and benchmark tests
+# ---------------------------------------------------------------------------
+
+# Helper: create a stress/benchmark test executable
+function(add_stress_test TEST_NAME TEST_SOURCE)
+    add_executable(${TEST_NAME} ${TEST_SOURCE})
+    target_link_libraries(${TEST_NAME}
+        PRIVATE
+            runtime
+            GTest::gtest_main
+            GTest::gtest
+            Folly::folly
+            Threads::Threads
+    )
+    target_include_directories(${TEST_NAME} PRIVATE ${FOLLY_INCLUDE_DIR})
+    if(FOLLY_BUILD_INCLUDE_DIR)
+        target_include_directories(${TEST_NAME} PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+    endif()
+    sanitizer_add(${TEST_NAME})
+    include(GoogleTest)
+    gtest_discover_tests(${TEST_NAME})
+endfunction()
+
+add_stress_test(test_stress     test_stress.cpp)
+add_stress_test(test_benchmark  test_benchmark.cpp)
