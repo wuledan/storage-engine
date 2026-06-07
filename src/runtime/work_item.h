@@ -14,6 +14,8 @@ struct WorkItem {
     uint8_t tag;          // 0 = func, 1 = coroutine
     uint32_t trace_id{0};
 
+    WorkItem() noexcept : func(nullptr), tag(0) {}
+
     void execute() noexcept {
         if (tag == 0) {
             func();
