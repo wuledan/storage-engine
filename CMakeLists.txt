@@ -50,9 +50,48 @@ if(NOT FOLLY_FOUND)
         elseif(EXISTS "/home/wuledan/work/3FS/build/third_party/folly/folly/folly-config.h")
             set(FOLLY_BUILD_INCLUDE_DIR "/home/wuledan/work/3FS/build/third_party/folly")
         endif()
+        # folly is a static library; find its transitive dependencies
+        find_package(PkgConfig QUIET)
+        # glog
+        find_library(GLOG_LIBRARY NAMES glog)
+        if(NOT GLOG_LIBRARY)
+            message(FATAL_ERROR "glog not found (needed by folly)")
+        endif()
+        # double-conversion
+        find_library(DOUBLE_CONVERSION_LIBRARY NAMES double-conversion)
+        if(NOT DOUBLE_CONVERSION_LIBRARY)
+            message(FATAL_ERROR "double-conversion not found (needed by folly)")
+        endif()
+        # fmt
+        find_library(FMT_LIBRARY NAMES fmt)
+        if(NOT FMT_LIBRARY)
+            message(FATAL_ERROR "fmt not found (needed by folly)")
+        endif()
+        # libunwind (for symbolizer)
+        find_library(UNWIND_LIBRARY NAMES unwind)
+        # gflags (for glog)
+        find_library(GFLAGS_LIBRARY NAMES gflags)
+        # boost_context (for folly::coro)
+        find_library(BOOST_CONTEXT_LIBRARY NAMES boost_context)
+        # collect interface link libraries
+        set(FOLLY_INTERFACE_LIBS
+            "${GLOG_LIBRARY}"
+            "${DOUBLE_CONVERSION_LIBRARY}"
+            "${FMT_LIBRARY}"
+        )
+        if(UNWIND_LIBRARY)
+            list(APPEND FOLLY_INTERFACE_LIBS "${UNWIND_LIBRARY}")
+        endif()
+        if(GFLAGS_LIBRARY)
+            list(APPEND FOLLY_INTERFACE_LIBS "${GFLAGS_LIBRARY}")
+        endif()
+        if(BOOST_CONTEXT_LIBRARY)
+            list(APPEND FOLLY_INTERFACE_LIBS "${BOOST_CONTEXT_LIBRARY}")
+        endif()
         set_target_properties(Folly::folly PROPERTIES
             IMPORTED_LOCATION "${FOLLY_LIBRARY}"
             INTERFACE_INCLUDE_DIRECTORIES "${FOLLY_INCLUDE_DIR};${FOLLY_BUILD_INCLUDE_DIR}"
+            INTERFACE_LINK_LIBRARIES "${FOLLY_INTERFACE_LIBS}"
         )
         set(FOLLY_FOUND TRUE)
         message(STATUS "Found folly (manual): ${FOLLY_LIBRARY}")

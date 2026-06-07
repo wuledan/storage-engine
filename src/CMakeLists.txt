@@ -1,14 +1,9 @@
 # src/CMakeLists.txt
 # Runtime and core library targets will be added here.
 
-add_library(storage_runtime STATIC
-    runtime/adaptive_idle.cc
-)
+file(GLOB RUNTIME_SOURCES "runtime/*.cc")
+add_library(runtime STATIC ${RUNTIME_SOURCES})
 
-target_include_directories(storage_runtime PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_link_libraries(storage_runtime PUBLIC
-    Threads::Threads
-)
+target_include_directories(runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(runtime PUBLIC Folly::folly Hwloc::hwloc Threads::Threads)
+sanitizer_add(runtime)
