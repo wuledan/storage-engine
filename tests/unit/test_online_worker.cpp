@@ -60,7 +60,7 @@ TEST(OnlineWorkerTest, DefaultQueuesRegistered) {
     auto* q_engine = w.get_q(w.engine_idx());
     ASSERT_NE(q_engine, nullptr);
     EXPECT_EQ(q_engine->type(), QueueType::kEngine);
-    EXPECT_EQ(q_engine->semantic(), QueueSemantic::kLocal);
+    EXPECT_EQ(q_engine->semantic(), QueueSemantic::kSPSC);
 
     auto* q_timer = w.get_q(w.timer_idx());
     ASSERT_NE(q_timer, nullptr);

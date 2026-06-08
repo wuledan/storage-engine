@@ -3,6 +3,8 @@
 #include "adaptive_idle.h"
 #include "scheduling_policy.h"
 #include "policy_factory.h"
+#include "adapt/object_pool.h"
+#include "adapt/memory_pool.h"
 #include <atomic>
 #include <memory>
 #include <string>
@@ -41,11 +43,13 @@ public:
     WorkerStats stats() const;
     size_t worker_id() const noexcept { return id_; }
 
+    // 公开队列访问，供外部轮询器和测试使用
+    WorkQueue* get_queue(size_t idx) const { return scheduler_.get_queue(idx); }
+
 protected:
     Scheduler& scheduler() { return scheduler_; }
     AdaptiveIdle& idle() { return *idle_; }
     const Config& config() const { return cfg_; }
-    WorkQueue* get_queue(size_t idx) const { return scheduler_.get_queue(idx); }
 
     // 子类覆写：在 start 的线程入口处自定义初始化
     virtual void on_worker_start() {}
@@ -54,6 +58,10 @@ protected:
     virtual void enqueue_affine(std::coroutine_handle<> h) {
         (void)h;  // 默认空实现，子类可覆写
     }
+
+    // ── 内存池访问 ──
+    adapt::QuantMemoryResource& memory_resource() { return *mem_pool_; }
+    adapt::ObjectPool<WorkItem>& work_item_pool() { return *work_item_pool_; }
 
 private:
     void worker_loop();
@@ -66,6 +74,10 @@ private:
     std::unique_ptr<SchedulingPolicy> policy_;
     Scheduler scheduler_;
     std::thread thread_;
+
+    // 每 worker 独立的共享 nothing 内存池
+    std::unique_ptr<adapt::QuantMemoryResource> mem_pool_;
+    std::unique_ptr<adapt::ObjectPool<WorkItem>> work_item_pool_;
 };
 
 }  // namespace storage::runtime

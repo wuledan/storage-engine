@@ -1,5 +1,5 @@
 // memory_pool.cc — Tiered memory pool implementation
-#include "cpp/quant/infra/memory_pool.h"
+#include "memory_pool.h"
 
 #include <algorithm>
 #include <array>
@@ -8,8 +8,10 @@
 #include <cstring>
 #include <new>
 
-#include "cpp/quant/infra/affinity_mutex.h"
-#include "cpp/quant/infra/coroutine.h"
+#include "affinity_mutex.h"
+#include <folly/coro/BlockingWait.h>
+
+using folly::coro::blockingWait;
 
 namespace storage::runtime::adapt {
 
@@ -101,7 +103,7 @@ private:
         FreeNode* next;
     };
     FreeNode* head_{nullptr};
-    infra::AffinityMutex mutex_;
+    AffinityMutex mutex_;
 };
 
 // ── Thread-local cache ──
@@ -322,7 +324,7 @@ private:
 
     SmallObjectConfig config_;
     std::array<std::unique_ptr<SizeClassFreeList>, kNumSizeClasses> small_free_lists_;
-    std::array<infra::AffinityMutex, kNumSizeClasses> class_mutexes_;
+    std::array<AffinityMutex, kNumSizeClasses> class_mutexes_;
     std::vector<char*> preallocated_blocks_;
     char* bump_block_ptr_ = nullptr;
     size_t bump_offset_ = 0;

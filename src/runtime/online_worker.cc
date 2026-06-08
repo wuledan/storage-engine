@@ -28,23 +28,26 @@ namespace {
 
 OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     : Worker(cfg) {
+    // Warmup 内存池
+    memory_resource().warmup(4 * 1024 * 1024);  // 4MB
+    work_item_pool().warmup(1024);
     idx_affine_ = add_queue(std::make_unique<AffineWorkQueue>(
         QueueType::kAffine, Priority::kCritical, "affine"));
     idx_net_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kNetIO, Priority::kHigh, "net_io"));
     idx_disk_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kDiskIO, Priority::kMedium, "disk_io"));
-    idx_engine_ = add_queue(std::make_unique<LocalWorkQueue>(
-        QueueType::kEngine, Priority::kMedium, "engine"));
+    idx_engine_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
+        QueueType::kEngine, Priority::kMedium, "engine", 200000));
     idx_timer_ = add_queue(std::make_unique<LocalWorkQueue>(
         QueueType::kTimer, Priority::kHigh, "timer"));
     set_policy(make_policy(PolicyConfig{"strict_priority"}));
 }
 
 void OnlineWorker::submit_engine(WorkItem item) {
-    auto* q = static_cast<LocalWorkQueue*>(get_queue(idx_engine_));
+    auto* q = static_cast<BatchedSPSCWorkQueue*>(get_queue(idx_engine_));
     if (q) {
-        q->try_enqueue(std::move(item));
+        q->push_batch(&item, 1);
     }
 }
 

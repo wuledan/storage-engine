@@ -52,3 +52,5 @@ add_runtime_test(test_runtime           test_runtime.cpp)
 
 add_runtime_test(test_coroutine_worker  test_coroutine_worker.cpp)
 add_runtime_test(test_affinity_routing  test_affinity_routing.cpp)
+
+add_runtime_test(test_memory_pool        test_memory_pool.cpp)

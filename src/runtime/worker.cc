@@ -60,6 +60,51 @@ void AffinityBaton::resume_chain(WaiterNode* waiters, RouteFunc* route) {
     }
 }
 
+// ── AffinityMutex method implementations ──
+// adapt/affinity_mutex.cc is excluded (needs quant_invest headers),
+// so we provide the bodies here.
+size_t AffinityMutex::current_worker_id() {
+    return detail::get_current_worker_id();
+}
+
+folly::coro::Task<AffinityMutex::AffinityMutexLock>
+AffinityMutex::co_scoped_lock() {
+    co_await co_lock();
+    co_return AffinityMutexLock{*this};
+}
+
+void AffinityMutex::unlock() {
+    auto old_state = state_.load(std::memory_order_relaxed);
+    Waiter* waiters;
+
+    do {
+        waiters = extract_waiters(old_state);
+        uintptr_t new_state;
+        if (waiters) {
+            auto* next = waiters->next;
+            new_state = next
+                ? (reinterpret_cast<uintptr_t>(next) | kLockedFlag)
+                : 0;
+        } else {
+            new_state = 0;
+        }
+        if (state_.compare_exchange_weak(
+                old_state, new_state,
+                std::memory_order_release,
+                std::memory_order_relaxed)) {
+            break;
+        }
+    } while (true);
+
+    if (waiters) {
+        if (route_ && waiters->worker_id != SIZE_MAX) {
+            route_(waiters->worker_id, waiters->handle);
+        } else {
+            waiters->handle.resume();
+        }
+    }
+}
+
 }  // namespace adapt
 
 std::atomic<size_t> Worker::next_id_{0};
@@ -69,7 +114,9 @@ Worker::Worker(Config cfg)
       cfg_(std::move(cfg)),
       idle_(std::make_unique<AdaptiveIdle>(cfg_.idle_cfg)),
       policy_(make_policy(cfg_.policy_cfg)),
-      scheduler_(policy_.get(), idle_.get()) {}
+      scheduler_(policy_.get(), idle_.get()),
+      mem_pool_(std::make_unique<adapt::QuantMemoryResource>()),
+      work_item_pool_(std::make_unique<adapt::ObjectPool<WorkItem>>()) {}
 
 size_t Worker::add_queue(std::unique_ptr<WorkQueue> q) {
     return scheduler_.register_queue(std::move(q));

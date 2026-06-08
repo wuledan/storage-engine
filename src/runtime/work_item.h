@@ -37,6 +37,13 @@ struct WorkItem {
         item.tag = 1;
         return item;
     }
+
+    // 供 ObjectPool 复用前重置
+    void reset() noexcept {
+        func = nullptr;
+        tag = 0;
+        trace_id = 0;
+    }
 };
 
 }  // namespace storage::runtime

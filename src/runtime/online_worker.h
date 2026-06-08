@@ -24,9 +24,7 @@ public:
     // 创建 RouteFunc，捕获 this 用于 enqueue_affine 路由
     adapt::RouteFunc make_route_func();
 
-    // 队列索引（在构造函数中注册）
-    // protected 以允许测试子类访问
-protected:
+    // 队列索引（在构造函数中注册，公开供外部轮询器和测试使用）
     size_t idx_engine_{0};
     size_t idx_net_io_{0};
     size_t idx_disk_io_{0};

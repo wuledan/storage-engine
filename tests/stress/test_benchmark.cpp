@@ -431,4 +431,124 @@ TEST_F(BenchmarkSummary, PrintHeader) {
     std::cout << "====================================================\n\n";
 }
 
+// ============================================================================
+// 7. 协程提交 + 调度的端到端延迟
+//    测量 submit_engine → task execute 的完整延迟
+// ============================================================================
+TEST(BenchmarkCoroutine, E2ECoroutineSubmitLatency) {
+    using namespace std::chrono;
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+
+    constexpr size_t kSamples = 10000;
+    std::vector<uint64_t> latencies(kSamples);
+
+    w.start();
+
+    for (size_t i = 0; i < kSamples; ++i) {
+        auto t0 = steady_clock::now();
+        static std::atomic<bool> done{false};
+        done = false;
+
+        w.submit_engine(WorkItem::make_func([]() {
+            done.store(true);
+        }));
+        w.notify();  // 唤醒 worker 处理任务
+
+        // 轮询等待完成
+        while (!done.load()) {
+            // busy wait (调度器在同一个worker线程，需要yield)
+            std::this_thread::yield();
+        }
+
+        auto t1 = steady_clock::now();
+        latencies[i] = duration_cast<nanoseconds>(t1 - t0).count();
+    }
+
+    w.stop();
+    w.join();
+
+    std::sort(latencies.begin(), latencies.end());
+
+    std::cout << "\n=== Coroutine E2E Submit Latency ===" << std::endl;
+    std::cout << "  P50: " << latencies[kSamples/2] / 1000.0 << " us" << std::endl;
+    std::cout << "  P99: " << latencies[kSamples*99/100] / 1000.0 << " us" << std::endl;
+    std::cout << "  P999: " << latencies[kSamples*999/1000] / 1000.0 << " us" << std::endl;
+}
+
+// ============================================================================
+// 8. OnlineWorker 批量任务吞吐
+// ============================================================================
+TEST(BenchmarkCoroutine, BulkTaskThroughput) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    constexpr size_t kTotal = 100000;
+    static std::atomic<size_t> done_count{0};
+    done_count = 0;
+
+    w.start();
+
+    auto t0 = std::chrono::steady_clock::now();
+
+    // 批量 submit (BatchedSPSCWorkQueue 容量足够，不会丢任务)
+    for (size_t i = 0; i < kTotal; ++i) {
+        w.submit_engine(WorkItem::make_func([]() {
+            done_count.fetch_add(1);
+        }));
+    }
+    w.notify();  // 唤醒 worker 处理
+
+    // 等待全部完成 (轮询)
+    while (done_count.load() < kTotal) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        w.notify();  // 轮询时持续唤醒，防止 worker 陷入 park
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    double ops_per_sec = kTotal * 1e6 / elapsed;
+
+    w.stop();
+    w.join();
+
+    std::cout << "\n=== OnlineWorker Bulk Task Throughput ===" << std::endl;
+    std::cout << "  " << kTotal << " tasks in " << elapsed << " us" << std::endl;
+    std::cout << "  Throughput: " << (ops_per_sec / 1e6) << " M ops/s" << std::endl;
+}
+
+// ============================================================================
+// 9. Worker start/stop 生命周期延迟
+// ============================================================================
+TEST(BenchmarkCoroutine, WorkerLifecycleLatency) {
+    constexpr size_t kCycles = 100;
+    std::vector<uint64_t> start_latencies(kCycles);
+    std::vector<uint64_t> stop_latencies(kCycles);
+
+    for (size_t i = 0; i < kCycles; ++i) {
+        Worker::Config cfg;
+        cfg.cpu_id = 0; // 不绑定CPU
+        OnlineWorker w(cfg);
+
+        auto t0 = std::chrono::steady_clock::now();
+        w.start();
+        auto t1 = std::chrono::steady_clock::now();
+
+        w.stop();
+        w.join();
+        auto t2 = std::chrono::steady_clock::now();
+
+        start_latencies[i] = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        stop_latencies[i] = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+    }
+
+    std::sort(start_latencies.begin(), start_latencies.end());
+    std::sort(stop_latencies.begin(), stop_latencies.end());
+
+    std::cout << "\n=== Worker Lifecycle Latency (" << kCycles << " cycles) ===" << std::endl;
+    std::cout << "  Start P50: " << start_latencies[kCycles/2] / 1000.0 << " us" << std::endl;
+    std::cout << "  Start P99: " << start_latencies[kCycles*99/100] / 1000.0 << " us" << std::endl;
+    std::cout << "  Stop  P50: " << stop_latencies[kCycles/2] / 1000.0 << " us" << std::endl;
+    std::cout << "  Stop  P99: " << stop_latencies[kCycles*99/100] / 1000.0 << " us" << std::endl;
+}
+
 

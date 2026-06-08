@@ -8,8 +8,11 @@
 #include <memory>
 #include <vector>
 
-#include "cpp/quant/infra/affinity_mutex.h"
-#include "cpp/quant/infra/coroutine.h"
+#include "affinity_mutex.h"
+#include <folly/coro/BlockingWait.h>
+
+// Bring blockingWait into scope (used unqualified in template code below)
+using folly::coro::blockingWait;
 
 namespace storage::runtime::adapt {
 
@@ -156,7 +159,7 @@ private:
 
         // Return object to pool (called by shared_ptr deleter)
         void return_object(size_t idx) {
-            auto lock = blockingWait(mutex_.co_scoped_lock());
+            auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
             free_list_.push_back(idx);
             in_use_.fetch_sub(1, std::memory_order_relaxed);
             stats_.release_count.fetch_add(1, std::memory_order_relaxed);
@@ -204,7 +207,7 @@ private:
         };
         AtomicStats stats_;
 
-        mutable infra::AffinityMutex mutex_;
+        mutable AffinityMutex mutex_;
     };
 
     std::shared_ptr<Impl> impl_;
