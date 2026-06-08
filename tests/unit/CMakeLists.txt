@@ -127,3 +127,27 @@ if(FOLLY_BUILD_INCLUDE_DIR)
 endif()
 sanitizer_add(test_io_backends)
 gtest_discover_tests(test_io_backends)
+
+# Error codes test
+add_executable(test_error_codes test_error_codes.cpp)
+target_link_libraries(test_error_codes
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+if(LIBURING)
+    target_link_libraries(test_error_codes PRIVATE ${LIBURING})
+endif()
+if(LIBAIO)
+    target_link_libraries(test_error_codes PRIVATE ${LIBAIO})
+endif()
+target_include_directories(test_error_codes PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_error_codes PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_error_codes)
+gtest_discover_tests(test_error_codes)

@@ -27,7 +27,12 @@ folly::coro::Task<IOCompletion> IIOBackend::co_read(
         }
     };
 
-    this->submit(std::move(req));
+    try {
+        this->submit(std::move(req));
+    } catch (const std::exception& e) {
+        result.result = -EIO;
+        co_return result;
+    }
     co_await *baton;
     co_return result;
 }
@@ -55,7 +60,12 @@ folly::coro::Task<IOCompletion> IIOBackend::co_write(
         }
     };
 
-    this->submit(std::move(req));
+    try {
+        this->submit(std::move(req));
+    } catch (const std::exception& e) {
+        result.result = -EIO;
+        co_return result;
+    }
     co_await *baton;
     co_return result;
 }

@@ -1,4 +1,5 @@
 #include "io_uring_backend.h"
+#include "runtime/storage_error.h"
 #include <liburing.h>
 #include <cstring>
 #include <stdexcept>
@@ -10,15 +11,15 @@ IOUringBackend::IOUringBackend(size_t queue_depth, IIOBackend::RouteFn route)
     : queue_depth_(queue_depth) {
     set_route_fn(std::move(route));
     pending_.reserve(queue_depth_ * 2);
-    // Resize to initial size
     pending_.resize(queue_depth_ * 2);
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
     int ret = io_uring_queue_init_params(queue_depth_, &ring_, &params);
     if (ret < 0) {
-        throw std::runtime_error("io_uring_queue_init failed: " +
-                                 std::string(strerror(-ret)));
+        throw std::runtime_error(
+            std::string("[io] IORingSetupFailed: io_uring_queue_init failed, ret=")
+            + std::to_string(-ret) + " (" + strerror(-ret) + ")");
     }
 }
 
@@ -31,10 +32,18 @@ void IOUringBackend::submit(IORequest req) {
     if (!sqe) {
         io_uring_submit(&ring_);
         sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) return;
+        if (!sqe) {
+            // 队列满且无法腾出空间 → 通过 callback 通知错误
+            if (req.callback) {
+                IOCompletion comp;
+                comp.result = -ENOBUFS;
+                comp.callback = std::move(req.callback);
+                comp.callback(comp);
+            }
+            return;
+        }
     }
 
-    // Use ever-increasing index to avoid overwriting in-flight callbacks
     uint64_t idx = submit_count_++;
     if (idx >= pending_.size()) {
         pending_.resize(std::max(pending_.size() * 2, idx + 1));
@@ -56,7 +65,15 @@ void IOUringBackend::submit(IORequest req) {
         break;
     }
     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(idx));
-    io_uring_submit(&ring_);
+
+    int ret = io_uring_submit(&ring_);
+    if (ret < 0 && pending_[idx].callback) {
+        // io_uring_submit 失败，通过 callback 通知
+        IOCompletion comp;
+        comp.result = ret;
+        comp.callback = std::move(pending_[idx].callback);
+        comp.callback(comp);
+    }
 }
 
 size_t IOUringBackend::poll(IOCompletion* out, size_t max) {
@@ -66,7 +83,13 @@ size_t IOUringBackend::poll(IOCompletion* out, size_t max) {
     while (count < max) {
         int ret = io_uring_peek_cqe(&ring_, &cqe);
         if (ret == -EAGAIN) break;
-        if (ret < 0) break;
+        if (ret < 0) {
+            // 轮询错误，填入首个输出槽
+            out[count].result = ret;
+            out[count].user_data = 0;
+            count++;
+            break;
+        }
 
         uint64_t idx = reinterpret_cast<uint64_t>(io_uring_cqe_get_data(cqe));
         assert(idx < pending_.size());

@@ -1,4 +1,5 @@
 #include "libaio_backend.h"
+#include "runtime/storage_error.h"
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -9,11 +10,13 @@ LibaioBackend::LibaioBackend(size_t queue_depth, IIOBackend::RouteFn route)
     : queue_depth_(queue_depth) {
     set_route_fn(std::move(route));
     pending_.resize(queue_depth_ * 2);
-    iocbs_.resize(1);  // 至少 1 个 iocb 槽
+    iocbs_.resize(1);
 
     int ret = io_setup(queue_depth_, &ctx_);
     if (ret < 0) {
-        throw std::runtime_error("io_setup failed: " + std::string(strerror(-ret)));
+        throw std::runtime_error(
+            std::string("[io] IOAioSetupFailed: io_setup failed, ret=")
+            + std::to_string(-ret) + " (" + strerror(-ret) + ")");
     }
 }
 
@@ -48,17 +51,31 @@ void LibaioBackend::submit(IORequest req) {
 
     cb->data = reinterpret_cast<void*>(idx);
     struct iocb* cbs[1] = {cb};
-    io_submit(ctx_, 1, cbs);
+    int ret = io_submit(ctx_, 1, cbs);
+    if (ret < 0) {
+        // 提交失败，通过 callback 通知
+        if (pending_[idx].callback) {
+            IOCompletion comp;
+            comp.result = ret;
+            comp.callback = std::move(pending_[idx].callback);
+            comp.callback(comp);
+        }
+    }
 }
 
 size_t LibaioBackend::poll(IOCompletion* out, size_t max) {
     struct io_event events[64];
     size_t to_get = std::min(max, sizeof(events) / sizeof(events[0]));
-    
-    // timeout=0: 非阻塞
+
     struct timespec ts = {0, 0};
-    int ret = io_getevents(ctx_, 0, to_get, events, &ts);
-    if (ret <= 0) return 0;
+    int ret = io_getevents(ctx_, 0, static_cast<long>(to_get), events, &ts);
+    if (ret < 0) {
+        // io_getevents 错误，填入首个输出槽
+        out[0].result = ret;
+        out[0].user_data = 0;
+        return 1;
+    }
+    if (ret == 0) return 0;
 
     for (int i = 0; i < ret; ++i) {
         uint64_t idx = reinterpret_cast<uint64_t>(events[i].data);

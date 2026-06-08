@@ -1,5 +1,7 @@
 #include "io_engine.h"
 #include "io_uring_backend.h"
+#include "libaio_backend.h"
+#include "spdk_backend.h"
 #include <stdexcept>
 
 namespace storage::io {
@@ -12,12 +14,10 @@ std::unique_ptr<IIOBackend> IOEngine::create(
         return std::make_unique<IOUringBackend>(cfg.queue_depth, std::move(route_fn));
     }
     if (cfg.type == "libaio") {
-        // TODO: implement LibaioBackend
-        throw std::runtime_error("libaio backend not yet implemented");
+        return std::make_unique<LibaioBackend>(cfg.queue_depth, std::move(route_fn));
     }
     if (cfg.type == "spdk") {
-        // TODO: implement SPDKBackend
-        throw std::runtime_error("SPDK backend not yet implemented");
+        return std::make_unique<SPDKBackend>(cfg, std::move(route_fn));
     }
 
     throw std::runtime_error("Unknown IO backend type: " + cfg.type);
