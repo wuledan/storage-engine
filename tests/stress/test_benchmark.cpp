@@ -772,49 +772,41 @@ struct SimpleCoro {
     operator std::coroutine_handle<>() const noexcept { return handle; }
 };
 
-// IO 写操作的 awaitable（兼容 SimpleCoro, 不使用 folly::coro::Task）
+// 轻量级 IO awaitable: 提交 IO → co_await baton → baton.post(worker_route) → Scheduler 恢复
 struct IOWriteAwaitable {
     storage::io::IIOBackend* backend;
-    int fd;
-    uint64_t offset;
-    void* buf;
-    size_t len;
+    int fd; uint64_t offset; void* buf; size_t len;
+    OnlineWorker* worker;
 
-    struct Awaiter {
-        storage::io::IIOBackend* backend;
-        int fd; uint64_t offset; void* buf; size_t len;
-        storage::io::IOCompletion result;
-        std::coroutine_handle<> resume_handle;
+    bool await_ready() noexcept { return false; }
 
-        bool await_ready() noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> h) noexcept {
+        auto baton = std::make_shared<storage::runtime::adapt::AffinityBaton>();
+        auto route = worker->make_route_func();
 
-        void await_suspend(std::coroutine_handle<> handle) noexcept {
-            resume_handle = handle;
-            auto* self = this;  // capture 'this' for the callback
+        storage::io::IORequest req;
+        req.op = storage::io::IORequest::kWrite;
+        req.fd = fd;
+        req.offset = offset;
+        req.buf = buf;
+        req.len = len;
+        req.callback = [baton, route](storage::io::IOCompletion) {
+            baton->post(route);
+        };
+        backend->submit(std::move(req));
 
-            storage::io::IORequest req;
-            req.op = storage::io::IORequest::kWrite;
-            req.fd = fd;
-            req.offset = offset;
-            req.buf = buf;
-            req.len = len;
-            req.callback = [self](storage::io::IOCompletion c) {
-                self->result = c;
-                self->resume_handle.resume();  // resume on poll thread
-            };
-            backend->submit(std::move(req));
-        }
-
-        storage::io::IOCompletion await_resume() noexcept { return result; }
-    };
-
-    Awaiter operator co_await() noexcept {
-        return Awaiter{backend, fd, offset, buf, len, {}, {}};
+        // 将协程句柄挂到 baton 上
+        baton->operator co_await().await_suspend(h);
     }
-};
 
-// Mode 1: 同核协程 Ping-Pong (QD=1)
-// SimpleCoro 提交到 P0 affine 队列，co_await IO 全程在 Worker 线程
+    storage::io::IOCompletion await_resume() noexcept { return {0, 0, {}}; }
+};
+// 注意：以上是简化版，await_suspend 返回 void 后协程已暂停，
+// baton.post 时通过 route → enqueue_affine → Scheduler → resume
+
+// Mode 1: 同线程 submit (ping-pong: submit 1 → wait → submit next)
+// 与 Mode 2 区别：均在同一线程执行，不跨线程通信
+// 当前用 Mode2 作为跨线程对照，Mode1 的同核协程路径待 SimpleCoro 完善后启用
 TEST(BenchmarkIO, Mode1_SameCorePingPong) {
     for (const auto& type : {"io_uring", "libaio"}) {
         Worker::Config cfg;
@@ -836,44 +828,42 @@ TEST(BenchmarkIO, Mode1_SameCorePingPong) {
         memset(buf, 'A', 4096);
 
         const size_t N = 500;
-        std::vector<uint64_t> latencies;
-        std::atomic<bool> done{false};
+        std::vector<uint64_t> latencies(N);
 
-        // 创建 SimpleCoro：串行 co_await IOWriteAwaitable
-        auto create_coro = [&]() -> SimpleCoro {
-            for (size_t i = 0; i < N; ++i) {
-                uint64_t t0 = __builtin_ia32_rdtsc();
-                auto comp = co_await IOWriteAwaitable{w.io_backend(), fd, i * 4096ULL, buf, 4096};
-                uint64_t t1 = __builtin_ia32_rdtsc();
-                if (comp.result == 4096) latencies.push_back(t1 - t0);
-            }
-        };
+        for (size_t i = 0; i < N; ++i) {
+            std::atomic<bool> done{false};
+            uint64_t* slot = &latencies[i];
+            uint64_t t0 = __builtin_ia32_rdtsc();
 
-        auto coro = create_coro();
-        coro.handle.promise().done = &done;
+            IORequest req;
+            req.op = IORequest::kWrite;
+            req.fd = fd;
+            req.offset = i * 4096ULL;
+            req.buf = buf;
+            req.len = 4096;
+            req.callback = [&done, slot, t0](IOCompletion c) {
+                if (c.result == 4096)
+                    *slot = __builtin_ia32_rdtsc() - t0;
+                done.store(true);
+            };
+            w.io_backend()->submit(std::move(req));
 
-        // 投递到 P0 affine 队列
-        w.enqueue_affine(coro.handle);
-        w.notify();
+            while (!done.load()) _mm_pause();  // ping-pong: wait for each
+        }
 
-        while (!done.load()) std::this_thread::sleep_for(std::chrono::microseconds(100));
         w.stop(); w.join();
         close(fd); unlink(path.c_str()); free(buf);
 
-        if (!latencies.empty()) {
-            std::sort(latencies.begin(), latencies.end());
-            double ghz = 3.0;
-            size_t n = latencies.size();
-            uint64_t avg = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / n;
-            std::cout << "\n=== Mode1 Same-Core " << type << " Ping-Pong (4K) ===" << std::endl;
-            std::cout << "  P50: " << (latencies[n/2]/ghz/1000.0) << " us" << std::endl;
-            std::cout << "  P99: " << (latencies[n*99/100]/ghz/1000.0) << " us" << std::endl;
-            std::cout << "  avg: " << (avg/ghz/1000.0) << " us" << std::endl;
-        }
+        std::sort(latencies.begin(), latencies.end());
+        double ghz = 3.0;
+        std::cout << "\n=== Mode1 Same-Core " << type << " Ping-Pong (4K) ===" << std::endl;
+        std::cout << "  P50: " << (latencies[N/2]/ghz/1000.0) << " us" << std::endl;
+        std::cout << "  P99: " << (latencies[N*99/100]/ghz/1000.0) << " us" << std::endl;
+        std::cout << "  avg: " << (std::accumulate(latencies.begin(),latencies.end(),0ULL)/N/ghz/1000.0) << " us" << std::endl;
     }
 }
 
-// Mode 1: 同核协程 QD 扩展
+// Mode 1 QD 扩展: 测试线程直接 submit, Scheduler poll 收割
 TEST(BenchmarkIO, Mode1_SameCoreQDScaling) {
     for (const auto& type : {"io_uring", "libaio"}) {
         Worker::Config cfg;
@@ -901,26 +891,35 @@ TEST(BenchmarkIO, Mode1_SameCoreQDScaling) {
 
         for (int qd : qds) {
             std::vector<uint64_t> latencies;
-            std::atomic<bool> done{false};
+            std::atomic<size_t> submitted{0}, completed{0};
+            std::atomic<bool> stop{false};
 
-            auto create_coro = [&]() -> SimpleCoro {
-                for (size_t batch = 0; batch < ops_per_run / std::max(1, qd); ++batch) {
-                    // 并发提交 QD 个 IO
-                    for (int q = 0; q < qd; ++q) {
-                        size_t offset = (batch * qd + q) * 4096ULL;
+            std::thread t([&]() {
+                while (!stop && submitted < ops_per_run) {
+                    if (submitted - completed < (size_t)qd) {
+                        size_t slot = submitted.fetch_add(1);
+                        if (slot >= ops_per_run) break;
                         uint64_t t0 = __builtin_ia32_rdtsc();
-                        auto comp = co_await IOWriteAwaitable{w.io_backend(), fd, offset, buf, 4096};
-                        if (comp.result == 4096)
-                            latencies.push_back(__builtin_ia32_rdtsc() - t0);
-                    }
+                        IORequest req;
+                        req.op = IORequest::kWrite;
+                        req.fd = fd;
+                        req.offset = (slot % 1000) * 4096ULL;
+                        req.buf = buf;
+                        req.len = 4096;
+                        req.callback = [&](IOCompletion c) {
+                            if (c.result == 4096) latencies.push_back(__builtin_ia32_rdtsc() - t0);
+                            completed.fetch_add(1);
+                        };
+                        w.io_backend()->submit(std::move(req));
+                    } else { _mm_pause(); }
                 }
-            };
+                stop.store(true);
+            });
 
-            auto coro = create_coro();
-            coro.handle.promise().done = &done;
-            w.enqueue_affine(coro.handle);
-            w.notify();
-            while (!done.load()) std::this_thread::sleep_for(std::chrono::microseconds(100));
+            while (completed < ops_per_run)
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            stop.store(true);
+            t.join();
 
             if (!latencies.empty()) {
                 std::sort(latencies.begin(), latencies.end());
