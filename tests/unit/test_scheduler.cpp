@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include <folly/coro/BlockingWait.h>
 #include "runtime/scheduler.h"
 #include "runtime/strict_priority_policy.h"
 #include "runtime/adaptive_idle.h"
@@ -47,7 +48,7 @@ TEST(SchedulerTest, RegisterAndPoll) {
         scheduler.register_queue(std::move(queue));
     }
 
-    std::thread t([&]() { scheduler.run(); });
+    std::thread t([&]() { folly::coro::blockingWait(scheduler.run()); });
 
     // Give scheduler time to process all items
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -106,7 +107,7 @@ TEST(SchedulerTest, MultiQueuePriorityOrder) {
         scheduler.register_queue(std::move(high_q));
     }
 
-    std::thread t([&]() { scheduler.run(); });
+    std::thread t([&]() { folly::coro::blockingWait(scheduler.run()); });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     scheduler.request_stop();
@@ -134,7 +135,7 @@ TEST(SchedulerTest, StopExitsLoop) {
         QueueType::kEngine, Priority::kCritical, "q");
     scheduler.register_queue(std::move(queue));
 
-    std::thread t([&]() { scheduler.run(); });
+    std::thread t([&]() { folly::coro::blockingWait(scheduler.run()); });
 
     // Give it a moment then stop
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -158,7 +159,7 @@ TEST(SchedulerTest, IdleWakeup) {
         QueueType::kTimer, Priority::kMedium, "idle_q");
     scheduler.register_queue(std::move(queue));
 
-    std::thread t([&]() { scheduler.run(); });
+    std::thread t([&]() { folly::coro::blockingWait(scheduler.run()); });
 
     // Wait long enough for the scheduler to reach idle-park state
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -201,7 +202,7 @@ TEST(SchedulerTest, MixedQueues) {
         scheduler.register_queue(std::move(q));
     }
 
-    std::thread t([&]() { scheduler.run(); });
+    std::thread t([&]() { folly::coro::blockingWait(scheduler.run()); });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     scheduler.request_stop();
@@ -231,7 +232,7 @@ TEST(SchedulerTest, BatchedQueueWork) {
     queue->push_batch(items, 5);
     scheduler.register_queue(std::move(queue));
 
-    std::thread t([&]() { scheduler.run(); });
+    std::thread t([&]() { folly::coro::blockingWait(scheduler.run()); });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     scheduler.request_stop();

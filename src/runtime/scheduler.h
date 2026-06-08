@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include <cstdint>
+#include <folly/coro/Task.h>
 
 namespace storage::runtime {
 
@@ -17,10 +18,11 @@ public:
     size_t register_queue(std::unique_ptr<WorkQueue> queue);
     WorkQueue* get_queue(size_t idx) const;
 
-    void run();
+    folly::coro::Task<void> run();
     void request_stop();
 
     void set_policy(SchedulingPolicy* policy) noexcept { policy_ = policy; }
+    void set_idle(AdaptiveIdle* idle) noexcept { idle_ = idle; }
     void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
 
     const SchedulerStats& stats() const noexcept { return stats_; }

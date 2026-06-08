@@ -1,4 +1,4 @@
-// affinity_shared_mutex.cc -- Implementation of executor-routed SharedMutex
+// affinity_shared_mutex.cc -- Implementation of routed SharedMutex
 //
 // Wake-up strategy:
 //   - unlock():       exclusive lock released. Try to wake waiters.
@@ -13,7 +13,6 @@
 //   - Remaining waiters are re-pushed via CAS (merging with new arrivals).
 
 #include "cpp/quant/infra/affinity_shared_mutex.h"
-#include "cpp/quant/infra/work_stealing_executor.h"
 
 #include <folly/coro/Task.h>
 
@@ -193,12 +192,8 @@ void AffinitySharedMutex::route_waiter(Waiter* waiter) {
     auto handle = waiter->handle;
     auto worker_id = waiter->worker_id;
 
-    auto* ws_executor = WorkStealingExecutor::current_executor();
-
-    if (ws_executor && worker_id != SIZE_MAX) {
-        ws_executor->add_to_worker(worker_id, [handle]() mutable {
-            handle.resume();
-        });
+    if (route_ && worker_id != SIZE_MAX) {
+        route_(worker_id, handle);
     } else {
         handle.resume();
     }

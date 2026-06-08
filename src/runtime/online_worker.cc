@@ -3,8 +3,28 @@
 #include "batched_spsc_work_queue.h"
 #include "local_work_queue.h"
 #include "policy_factory.h"
+#include <mutex>
 
 namespace storage::runtime {
+
+namespace {
+    // 用于 co_submit_engine 的全局桥接状态
+    // WorkItem::Func 是 void(*)()，不支持捕获 lambda，
+    // 因此通过此全局 slot + 静态函数桥接。
+    // 使用 mutex 保护，测试场景为顺序调用，无并发冲突。
+    std::function<void()> g_engine_task;
+    std::mutex g_engine_task_mutex;
+
+    // 静态函数指针，作为 WorkItem::Func 提交
+    void run_engine_task() {
+        std::function<void()> task;
+        {
+            std::lock_guard<std::mutex> lock(g_engine_task_mutex);
+            task = std::move(g_engine_task);
+        }
+        if (task) task();
+    }
+}
 
 OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     : Worker(cfg) {
@@ -40,6 +60,39 @@ void OnlineWorker::submit_disk_io(WorkItem item) {
     if (q) {
         q->push_batch(&item, 1);
     }
+}
+
+void OnlineWorker::enqueue_affine(std::coroutine_handle<> h) {
+    auto* q = static_cast<AffineWorkQueue*>(get_queue(idx_affine_));
+    if (q) {
+        q->enqueue(WorkItem::make_coro(h));
+        notify();  // 唤醒可能 idle 的 worker
+    }
+}
+
+adapt::RouteFunc OnlineWorker::make_route_func() {
+    return [this](size_t /*worker_id*/, std::coroutine_handle<> h) {
+        this->enqueue_affine(h);
+    };
+}
+
+folly::coro::Task<void> OnlineWorker::co_submit_engine(std::function<void()> work) {
+    auto baton = std::make_shared<adapt::AffinityBaton>();
+    auto route = make_route_func();
+
+    // 将 work + baton post 打包为 std::function，通过全局 slot 桥接
+    {
+        std::lock_guard<std::mutex> lock(g_engine_task_mutex);
+        g_engine_task = [baton, work = std::move(work), route = std::move(route)]() {
+            work();
+            baton->post(route);
+        };
+    }
+
+    submit_engine(WorkItem::make_func(run_engine_task));
+    notify();  // 唤醒 worker，确保引擎队列任务被处理
+
+    co_await *baton;
 }
 
 }  // namespace storage::runtime

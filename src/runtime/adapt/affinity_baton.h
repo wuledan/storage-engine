@@ -13,10 +13,12 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 
 namespace storage::runtime::adapt {
 
-class WorkStealingExecutor;
+// 通用路由回调：将协程句柄路由到指定 worker 线程
+using RouteFunc = std::function<void(size_t worker_id, std::coroutine_handle<>)>;
 
 namespace detail {
     extern size_t (*get_current_worker_id)();
@@ -43,7 +45,10 @@ public:
         // resume them inline so they can continue and eventually notice.
         auto* waiters = waiters_.exchange(nullptr, std::memory_order_acq_rel);
         if (waiters) {
-            resume_chain(waiters, nullptr);
+            // Clear the posted bit (kPostedBit = 1) which may be encoded in
+            // waiters_ after post() has been called.  Without clearing, we'd
+            // pass an invalid pointer (e.g. 0x1) into resume_chain.
+            resume_chain(clear_posted(waiters), nullptr);
         }
     }
 
@@ -116,14 +121,15 @@ public:
         return Awaiter{*this, WaiterNode{}};
     }
 
-    // ── Post with executor routing ──
+    // ── Post with routing ──
     //
     // Atomically drains the waiter chain and routes each waiter's
-    // continuation through executor.add_to_worker(worker_id, handle).
-    // This guarantees each waiter resumes on its original worker thread.
-    void post(WorkStealingExecutor& executor);
+    // continuation through the provided RouteFunc. The caller is
+    // responsible for delivering the coroutine handle to the correct
+    // worker thread (e.g. via add_to_worker or a work-stealing executor).
+    void post(RouteFunc route);
 
-    // ── Direct post (no executor) ──
+    // ── Direct post (no routing) ──
     //
     // Resume all waiters inline on the calling thread.
     // Use for: destruction cleanup, test code, non-executor contexts.
@@ -133,7 +139,7 @@ private:
     static size_t current_worker_id();
 
     static void resume_chain(WaiterNode* waiters,
-                             WorkStealingExecutor* executor);
+                             RouteFunc* route);
 
     // Posted bit encoded in waiters_ pointer low bit (pointer is 4/8-byte aligned).
     // This merges state_ and waiters_ into a single atomic, eliminating the

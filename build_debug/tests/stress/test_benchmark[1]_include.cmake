@@ -1,0 +1,5 @@
+if(EXISTS "/home/wuledan/work/proj/storage-engine/build_debug/tests/stress/test_benchmark[1]_tests.cmake")
+  include("/home/wuledan/work/proj/storage-engine/build_debug/tests/stress/test_benchmark[1]_tests.cmake")
+else()
+  add_test(test_benchmark_NOT_BUILT test_benchmark_NOT_BUILT)
+endif()

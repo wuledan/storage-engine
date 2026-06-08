@@ -1,6 +1,7 @@
 #include "scheduler.h"
 #include <chrono>
 #include <algorithm>
+#include <folly/coro/Task.h>
 
 namespace storage::runtime {
 
@@ -27,7 +28,7 @@ WorkQueue* Scheduler::get_queue(size_t idx) const {
     return nullptr;
 }
 
-void Scheduler::run() {
+folly::coro::Task<void> Scheduler::run() {
     // Signal we're running, then check if stop was already requested.
     // Must NOT reset stop_requested_ here — doing so would undo a stop
     // that was already signaled before we started, causing the worker
@@ -36,7 +37,7 @@ void Scheduler::run() {
     if (stop_requested_.load(std::memory_order_acquire)) {
         running_.store(false, std::memory_order_release);
         if (idle_) idle_->notify();
-        return;
+        co_return;
     }
 
     constexpr size_t kMaxBatchSize = 64;
@@ -84,6 +85,8 @@ void Scheduler::run() {
         }
         total_dequeued_[decision.queue_index] += n;
     }
+
+    co_return;
 }
 
 void Scheduler::request_stop() {

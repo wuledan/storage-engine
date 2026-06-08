@@ -42,8 +42,13 @@ add_runtime_test(test_scheduling         test_scheduling.cpp)
 add_runtime_test(test_adaptive_idle      test_adaptive_idle.cpp)
 add_runtime_test(test_scheduler          test_scheduler.cpp)
 
+add_runtime_test(test_coroutine          test_coroutine.cpp)
+
 # Phase 5-6: Worker, OnlineWorker, OnlineGroup, Runtime
 add_runtime_test(test_worker            test_worker.cpp)
 add_runtime_test(test_online_worker     test_online_worker.cpp)
 add_runtime_test(test_online_group      test_online_group.cpp)
 add_runtime_test(test_runtime           test_runtime.cpp)
+
+add_runtime_test(test_coroutine_worker  test_coroutine_worker.cpp)
+add_runtime_test(test_affinity_routing  test_affinity_routing.cpp)

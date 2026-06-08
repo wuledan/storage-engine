@@ -1,8 +1,66 @@
 #include "worker.h"
 #include "policy_factory.h"
+#include "adapt/affinity_baton.h"
 #include <hwloc.h>
+#include <folly/coro/BlockingWait.h>
 
 namespace storage::runtime {
+
+namespace {
+thread_local size_t tls_worker_id = SIZE_MAX;
+
+// Default worker-id resolver (returns "no affinity")
+size_t default_worker_id() { return SIZE_MAX; }
+}
+
+// Define the function pointer declared in adapt/affinity_baton.h.
+// adapt/*.cc files are excluded from this build, so we provide the
+// definition here instead.
+namespace adapt::detail {
+    size_t (*get_current_worker_id)() = default_worker_id;
+}
+
+// ── AffinityBaton method implementations ──
+// adapt/*.cc files are excluded from the build, so we also provide
+// the AffinityBaton method bodies here (they would normally live in
+// adapt/affinity_baton.cc, which includes a quant_invest header).
+namespace adapt {
+
+size_t AffinityBaton::current_worker_id() {
+    return detail::get_current_worker_id();
+}
+
+void AffinityBaton::post(RouteFunc route) {
+    auto* old = waiters_.exchange(
+        reinterpret_cast<WaiterNode*>(kPostedBit),
+        std::memory_order_acq_rel);
+    resume_chain(clear_posted(old), &route);
+}
+
+void AffinityBaton::post_direct() noexcept {
+    auto* old = waiters_.exchange(
+        reinterpret_cast<WaiterNode*>(kPostedBit),
+        std::memory_order_acq_rel);
+    resume_chain(clear_posted(old), nullptr);
+}
+
+void AffinityBaton::resume_chain(WaiterNode* waiters, RouteFunc* route) {
+    while (waiters) {
+        auto* next = waiters->next;
+        auto handle = waiters->handle;
+        auto worker_id = waiters->worker_id;
+
+        if (route && worker_id != SIZE_MAX) {
+            (*route)(worker_id, handle);
+        } else {
+            handle.resume();
+        }
+
+        waiters = next;
+    }
+}
+
+}  // namespace adapt
 
 std::atomic<size_t> Worker::next_id_{0};
 
@@ -64,8 +122,12 @@ WorkerStats Worker::stats() const {
 }
 
 void Worker::worker_loop() {
+    tls_worker_id = id_;
+    adapt::detail::get_current_worker_id = []() -> size_t { return tls_worker_id; };
     on_worker_start();
-    scheduler_.run();
+    folly::coro::blockingWait(scheduler_.run());
+    tls_worker_id = SIZE_MAX;
+    adapt::detail::get_current_worker_id = []() -> size_t { return SIZE_MAX; };
 }
 
 }  // namespace storage::runtime

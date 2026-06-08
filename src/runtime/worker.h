@@ -50,6 +50,11 @@ protected:
     // 子类覆写：在 start 的线程入口处自定义初始化
     virtual void on_worker_start() {}
 
+    // 向本 worker 的 affine queue 投递协程句柄（外部线程可调用）
+    virtual void enqueue_affine(std::coroutine_handle<> h) {
+        (void)h;  // 默认空实现，子类可覆写
+    }
+
 private:
     void worker_loop();
 

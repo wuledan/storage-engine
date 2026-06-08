@@ -18,12 +18,12 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "affinity_baton.h"
+
 // Forward-declare folly::coro::Task for co_scoped_lock() return types.
 namespace folly::coro { template<typename T> class Task; }
 
 namespace storage::runtime::adapt {
-
-class WorkStealingExecutor;
 
 // ── AffinitySharedMutex ──
 //
@@ -288,6 +288,10 @@ public:
 
     void unlock_shared();
 
+    // ── 设置路由回调（用于线程亲和唤醒） ──
+
+    void set_route(RouteFunc route) { route_ = std::move(route); }
+
 private:
     static size_t current_worker_id();
 
@@ -312,6 +316,8 @@ private:
 
     std::atomic<uint32_t> state_{0};
     std::atomic<Waiter*> waiters_{nullptr};
+
+    RouteFunc route_;  // 路由回调，wake_waiters() 中唤醒 waiter 时使用
 };
 
 }  // namespace storage::runtime::adapt

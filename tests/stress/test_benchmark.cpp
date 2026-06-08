@@ -9,6 +9,7 @@
 #include <iostream>
 #include <iomanip>
 #include <mutex>
+#include <folly/coro/BlockingWait.h>
 #include "runtime/local_queue.h"
 #include "runtime/batched_spsc_queue.h"
 #include "runtime/affine_work_queue.h"
@@ -311,7 +312,7 @@ TEST_F(BenchmarkTest, SchedulerThroughput) {
     }
 
     uint64_t t0 = now_ns();
-    std::thread scheduler_thread([&]() { scheduler.run(); });
+    std::thread scheduler_thread([&]() { folly::coro::blockingWait(scheduler.run()); });
 
     // Wait for all tasks to complete
     while (s_count.load() < kNumTasks) {

@@ -18,13 +18,13 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "affinity_baton.h"
+
 // Forward-declare folly::coro::Task for co_scoped_lock() return type.
 // Full definition is in <folly/coro/Task.h>, included via coroutine.h in the .cc.
 namespace folly::coro { template<typename T> class Task; }
 
 namespace storage::runtime::adapt {
-
-class WorkStealingExecutor;
 
 // ── AffinityMutex ──
 //
@@ -193,6 +193,10 @@ public:
 
     void unlock();
 
+    // ── 设置路由回调（用于线程亲和唤醒） ──
+
+    void set_route(RouteFunc route) { route_ = std::move(route); }
+
 private:
     static size_t current_worker_id();
 
@@ -207,6 +211,8 @@ private:
     // Waiter pointers are always aligned (at least 2-byte aligned for
     // struct with pointer + size_t members), so bit 0 is safe for the flag.
     std::atomic<uintptr_t> state_{0};
+
+    RouteFunc route_;  // 路由回调，unlock() 中唤醒 waiter 时使用
 };
 
 }  // namespace storage::runtime::adapt

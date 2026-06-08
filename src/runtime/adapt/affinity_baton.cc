@@ -1,12 +1,11 @@
-// affinity_baton.cc -- Implementation of executor-routed Baton
+// affinity_baton.cc -- Implementation of routed Baton
 //
 // The core mechanism:
-//   post(executor): atomically drain waiter chain, route each waiter's
-//                   continuation via executor.add_to_worker(worker_id, handle)
-//   post_direct():  drain and resume inline (no executor routing)
+//   post(route): atomically drain waiter chain, route each waiter's
+//                continuation via the provided RouteFunc
+//   post_direct():  drain and resume inline (no routing)
 
 #include "cpp/quant/infra/affinity_baton.h"
-#include "cpp/quant/infra/work_stealing_executor.h"
 
 namespace storage::runtime::adapt {
 
@@ -28,16 +27,16 @@ size_t AffinityBaton::current_worker_id() {
     return detail::get_current_worker_id();
 }
 
-// ── post(executor): routed resume ──
+// ── post(route): routed resume ──
 
-void AffinityBaton::post(WorkStealingExecutor& executor) {
+void AffinityBaton::post(RouteFunc route) {
     // Atomically swap waiters_ to kPostedBit (drain list + set posted).
     // Single atomic operation — no window between "drain" and "set state".
     auto* old = waiters_.exchange(
         reinterpret_cast<WaiterNode*>(kPostedBit),
         std::memory_order_acq_rel);
 
-    resume_chain(clear_posted(old), &executor);
+    resume_chain(clear_posted(old), &route);
 }
 
 // ── post_direct(): inline resume (no executor) ──
@@ -53,19 +52,17 @@ void AffinityBaton::post_direct() noexcept {
 // ── resume_chain: walk the linked list and resume each waiter ──
 
 void AffinityBaton::resume_chain(WaiterNode* waiters,
-                                  WorkStealingExecutor* executor) {
+                                  RouteFunc* route) {
     while (waiters) {
         auto* next = waiters->next;
         auto handle = waiters->handle;
         auto worker_id = waiters->worker_id;
 
-        if (executor && worker_id != SIZE_MAX) {
-            // Route to the waiter's original worker via executor
-            executor->add_to_worker(worker_id, [handle]() mutable {
-                handle.resume();
-            });
+        if (route && worker_id != SIZE_MAX) {
+            // Route to the waiter's original worker via callback
+            (*route)(worker_id, handle);
         } else {
-            // No executor or no affinity: resume inline
+            // No route or no affinity: resume inline
             handle.resume();
         }
 

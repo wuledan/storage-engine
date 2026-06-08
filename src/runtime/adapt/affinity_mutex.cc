@@ -1,12 +1,11 @@
-// affinity_mutex.cc -- Implementation of executor-routed Mutex
+// affinity_mutex.cc -- Implementation of routed Mutex
 //
 // The core mechanism:
 //   unlock(): atomically transition state. If waiters exist, dequeue one
-//             and route its continuation via executor.add_to_worker().
+//             and route its continuation via route_ (RouteFunc).
 //             Remaining waiters are re-pushed atomically.
 
 #include "cpp/quant/infra/affinity_mutex.h"
-#include "cpp/quant/infra/work_stealing_executor.h"
 
 #include <folly/coro/Task.h>
 
@@ -92,17 +91,11 @@ void AffinityMutex::unlock() {
     auto handle = to_wake->handle;
     auto worker_id = to_wake->worker_id;
 
-    // Get the WorkStealingExecutor from thread-local context.
-    // This is set by WorkStealingExecutor during worker_loop().
-    auto* ws_executor = WorkStealingExecutor::current_executor();
-
-    if (ws_executor && worker_id != SIZE_MAX) {
-        // Route to the waiter's original worker via executor
-        ws_executor->add_to_worker(worker_id, [handle]() mutable {
-            handle.resume();
-        });
+    if (route_ && worker_id != SIZE_MAX) {
+        // Route via the configured callback
+        route_(worker_id, handle);
     } else {
-        // No executor or no affinity: resume inline
+        // No route or no affinity: resume inline
         handle.resume();
     }
 }

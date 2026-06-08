@@ -23,7 +23,7 @@ size_t AffineWorkQueue::try_dequeue_batch(WorkItem* items, size_t max_count) noe
 }
 
 size_t AffineWorkQueue::approx_count() const noexcept {
-    return 0;
+    return queue_.size();
 }
 
 }  // namespace storage::runtime
