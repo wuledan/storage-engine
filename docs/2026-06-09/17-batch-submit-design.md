@@ -80,14 +80,17 @@ private:
 };
 ```
 
-## 3. 调度决策
+## 3. 调度决策（含老化）
 
 ```
 Scheduler::flush_pending():
-  ┌─ 有 P0 请求？ → 立即 flush 全部
+  for each buffer:
+    effective = buffer.priority - age_weight * buffer.age
+  
+  ┌─ 有 effective ≤ 0 (P0/老化足够)？ → flush 全部
   ├─ total_pending >= QD？ → flush 全部
   ├─ oldest_buffer.age >= 3？ → flush 该 buffer
-  └─ 否则 → 继续缓冲，不提交
+  └─ 否则 → 继续缓冲
 ```
 
 ## 4. 与现有架构的集成
@@ -145,7 +148,13 @@ Engine 协程: 恢复 → 拿到 IOCompletion
 ## 7. 待确认 → 已确认
 
 1. **单请求缓冲**：单请求统一走 buffer，但 deadline=1 轮（即下一轮立刻 flush）。避免单请求被部分填充的 buffer 无限阻塞。
-2. **加权**：buffer 合并时，合并后的 priority 取各 buffer 的 `max(priority_i)`——不降级。调度时高优 buffer 先 flush。
+2. **加权**：buffer 合并时取 `max(priorities)`。调度决策时引入 **优先级老化**：buffer 每等一轮，effective_priority 上升。低优先级 buffer 等够久后强制 flush，防止饥饿。
+
+```
+effective_priority = base_priority - age_weight * buffer_age_iterations
+// priority 数值越小越高 (0=P0, 3=P3)
+// 老化使 effective 递减，最终触发 flush
+```
 3. **跨 Worker 场景**：可能存在。Worker A 的协程恢复后需要向 Worker B 的 io_uring 提交 IO（例如数据跨 shard）。`submit_batch` 的目标 io_uring 实例与调用方 Worker 解耦。
 
 ## 8. 最终实现计划
