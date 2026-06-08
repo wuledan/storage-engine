@@ -9,7 +9,8 @@
 | 2026-06-07 | [03-execution-layer.md](2026-06-07/03-execution-layer.md) | 执行层设计：Online/Offline Worker Group |
 | 2026-06-08 | [04-runtime-layer.md](2026-06-08/04-runtime-layer.md) | Runtime 层详细设计：多队列、调度策略、自适应空闲 |
 | 2026-06-08 | [05-runtime-plan.md](2026-06-08/05-runtime-plan.md) | Runtime 实现计划 v2：20任务/55h + 三级测试体系 |
-| 2026-06-08 | [06-runtime-refinement.md](2026-06-08/06-runtime-refinement.md) | Runtime 设计修正：Online 无锁队列优化 + Offline 复用 quant/infra |
+| 2026-06-08 | [07-perf-counter-design.md](2026-06-08/07-perf-counter-design.md) | 性能计数与 Trace 系统设计 |
+| 2026-06-08 | [08-benchmark-report.md](2026-06-08/08-benchmark-report.md) | Benchmark 报告 |
 
 ## 项目定位
 
