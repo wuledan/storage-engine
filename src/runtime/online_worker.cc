@@ -34,6 +34,7 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     work_item_pool().warmup(1024);
     idx_affine_ = add_queue(std::make_unique<AffineWorkQueue>(
         QueueType::kAffine, Priority::kCritical, "affine"));
+    scheduler().set_affine_idx(idx_affine_);
     idx_net_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kNetIO, Priority::kHigh, "net_io"));
     idx_disk_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(

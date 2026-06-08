@@ -28,11 +28,27 @@ WorkQueue* Scheduler::get_queue(size_t idx) const {
     return nullptr;
 }
 
+// 排空 P0 (affine) 队列，直到为空
+void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
+    if (affine_idx_ >= queues_.size()) return;
+    auto& q = queues_[affine_idx_];
+    while (true) {
+        size_t n = q->try_dequeue_batch(batch.data(), max_batch);
+        if (n == 0) break;
+        last_poll_times_[affine_idx_] = now_ns();
+        for (size_t i = 0; i < n; ++i) {
+            auto t0 = now_ns();
+            batch[i].execute();
+            auto exec_ns = now_ns() - t0;
+            stats_.total_tasks_executed++;
+            stats_.total_exec_ns += exec_ns;
+            if (perf_) perf_->record_exec(q->type(), exec_ns);
+        }
+        total_dequeued_[affine_idx_] += n;
+    }
+}
+
 folly::coro::Task<void> Scheduler::run() {
-    // Signal we're running, then check if stop was already requested.
-    // Must NOT reset stop_requested_ here — doing so would undo a stop
-    // that was already signaled before we started, causing the worker
-    // thread to run forever in its loop (nobody calls request_stop again).
     running_.store(true, std::memory_order_release);
     if (stop_requested_.load(std::memory_order_acquire)) {
         running_.store(false, std::memory_order_release);
@@ -47,9 +63,9 @@ folly::coro::Task<void> Scheduler::run() {
     std::vector<WorkItem> batch(kMaxBatchSize);
 
     while (running_.load(std::memory_order_acquire)) {
-        // 每次循环先轮询 IO 完成事件（即使队列为空或 idle）
+        // ── Step 1: IO poll + 立即排空产生的 P0 ──
         if (io_backend_) {
-            io_backend_->flush_submissions();  // 批量提交所有待处理 SQE
+            io_backend_->flush_submissions();
             storage::io::IOCompletion io_comps[64];
             size_t io_n = io_backend_->poll(io_comps, 64);
             for (size_t j = 0; j < io_n; ++j) {
@@ -57,14 +73,22 @@ folly::coro::Task<void> Scheduler::run() {
                     io_comps[j].callback(io_comps[j]);
                 }
             }
+            // IO 完成回调会 baton.post → enqueue_affine → P0
+            // 立即排空 P0，不等下一轮
+            drain_p0(batch, kMaxBatchSize);
         }
 
+        // ── Step 2: 再次排空 P0（任务执行可能产生新 P0） ──
+        drain_p0(batch, kMaxBatchSize);
+
+        // ── Step 3: 快照 + 策略决策 ──
         snapshots.clear();
         for (size_t i = 0; i < queues_.size(); ++i) {
+            // P0 已经排空，跳过让策略关注低优先级
             QueueSnapshot snap;
             snap.type = queues_[i]->type();
             snap.priority = queues_[i]->base_priority();
-            snap.approx_count = queues_[i]->approx_count();
+            snap.approx_count = (i == affine_idx_) ? 0 : queues_[i]->approx_count();
             snap.last_poll_ns = last_poll_times_[i];
             snap.total_dequeued = total_dequeued_[i];
             snapshots.push_back(snap);
@@ -73,10 +97,10 @@ folly::coro::Task<void> Scheduler::run() {
         auto decision = policy_->decide(snapshots, stats_);
         stats_.total_polls++;
 
+        // ── Step 4: 全空 → 继续或 idle ──
         if (decision.idle) {
-            // 有 IO backend 时持续 polling，不进入 idle 阻塞
             if (io_backend_) {
-                continue;  // 跳过休眠，继续 polling
+                continue;
             }
             stats_.total_idles++;
             idle_->enter_idle();
@@ -97,8 +121,7 @@ folly::coro::Task<void> Scheduler::run() {
             }
             auto t0 = now_ns();
             batch[i].execute();
-            auto t1 = now_ns();
-            auto exec_ns = t1 - t0;
+            auto exec_ns = now_ns() - t0;
             stats_.total_tasks_executed++;
             stats_.total_exec_ns += exec_ns;
             if (perf_) {
@@ -107,6 +130,9 @@ folly::coro::Task<void> Scheduler::run() {
             policy_->on_task_completed(queue->type(), exec_ns);
         }
         total_dequeued_[decision.queue_index] += n;
+
+        // ── Step 5: 执行任务可能产生新 P0 → 立即排空 ──
+        drain_p0(batch, kMaxBatchSize);
     }
 
     co_return;
