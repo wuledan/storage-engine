@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <numeric>
 #include <cstdint>
+#include <random>
 #include <iostream>
 #include <iomanip>
 #include <cstdio>
@@ -863,81 +864,6 @@ TEST(BenchmarkIO, Mode1_SameCorePingPong) {
     }
 }
 
-// Mode 1 QD 扩展: 测试线程直接 submit, Scheduler poll 收割
-TEST(BenchmarkIO, Mode1_SameCoreQDScaling) {
-    for (const auto& type : {"io_uring", "libaio"}) {
-        Worker::Config cfg;
-        cfg.cpu_id = 1;
-        OnlineWorker w(cfg);
-        IOBackendConfig io_cfg;
-        io_cfg.type = type;
-        io_cfg.queue_depth = 256;
-        try { w.init_io_backend(io_cfg); } catch (...) { continue; }
-        w.start();
-
-        std::string path = "/mnt/nvme_test/bench_m1_qd_" + std::string(type);
-        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
-        if (fd < 0) { w.stop(); w.join(); continue; }
-        void* buf = nullptr;
-        posix_memalign(&buf, 4096, 4096);
-        memset(buf, 'B', 4096);
-
-        std::vector<int> qds = {1, 4, 16, 64, 128};
-        const size_t ops_per_run = 500;
-
-        std::cout << "\n=== Mode1 Same-Core " << type << " QD Scaling (4K) ===" << std::endl;
-        std::cout << "  QD    |  P50(us)  |  P99(us)  |  Avg(us)  |  IOPS(K)" << std::endl;
-        std::cout << "  ------|-----------|-----------|-----------|----------" << std::endl;
-
-        for (int qd : qds) {
-            std::vector<uint64_t> latencies;
-            std::atomic<size_t> submitted{0}, completed{0};
-            std::atomic<bool> stop{false};
-
-            std::thread t([&]() {
-                while (!stop && submitted < ops_per_run) {
-                    if (submitted - completed < (size_t)qd) {
-                        size_t slot = submitted.fetch_add(1);
-                        if (slot >= ops_per_run) break;
-                        uint64_t t0 = __builtin_ia32_rdtsc();
-                        IORequest req;
-                        req.op = IORequest::kWrite;
-                        req.fd = fd;
-                        req.offset = (slot % 1000) * 4096ULL;
-                        req.buf = buf;
-                        req.len = 4096;
-                        req.callback = [&](IOCompletion c) {
-                            if (c.result == 4096) latencies.push_back(__builtin_ia32_rdtsc() - t0);
-                            completed.fetch_add(1);
-                        };
-                        w.io_backend()->submit(std::move(req));
-                    } else { _mm_pause(); }
-                }
-                stop.store(true);
-            });
-
-            while (completed < ops_per_run)
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-            stop.store(true);
-            t.join();
-
-            if (!latencies.empty()) {
-                std::sort(latencies.begin(), latencies.end());
-                double ghz = 3.0;
-                size_t n = latencies.size();
-                double avg_ns = std::accumulate(latencies.begin(),latencies.end(),0ULL)/(double)n/ghz;
-                double iops = 1e9 / (avg_ns > 0 ? avg_ns : 1) * qd / 1000.0;
-                printf("  %-4d  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.1f\n",
-                       qd, (latencies[n/2]/ghz/1000.0), (latencies[n*99/100]/ghz/1000.0),
-                       avg_ns/1000.0, iops);
-            }
-        }
-
-        w.stop(); w.join();
-        close(fd); unlink(path.c_str()); free(buf);
-    }
-}
-
 // Mode 2: 跨线程 Ping-Pong
 TEST(BenchmarkIO, Mode2_CrossThreadPingPong) {
     for (const auto& type : {"io_uring", "libaio"}) {
@@ -1162,5 +1088,112 @@ TEST(BenchmarkIO, NVMe_BlockSizeMatrix) {
 
         w.stop();
         w.join();
+    }
+}
+
+// ===== 严谨 QD 扩展 Benchmark (对齐 fio 模型, 1GB 顺序写) =====
+TEST(BenchmarkIO, QDBatchPipelined) {
+    const size_t BLOCK_SIZE = 4096;
+    const std::vector<int> qds = {1, 4, 16, 64, 128, 256};
+
+    for (const auto& type : {"io_uring", "libaio"}) {
+        Worker::Config cfg;
+        cfg.cpu_id = 1;
+        OnlineWorker w(cfg);
+        IOBackendConfig io_cfg;
+        io_cfg.type = type;
+        io_cfg.queue_depth = 256;
+        try { w.init_io_backend(io_cfg); }
+        catch (...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
+        w.start();
+
+        std::string path = "/mnt/nvme_test/bench_qd_batch_" + std::string(type);
+        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+        ASSERT_GE(fd, 0);
+
+        // 预分配 1GB 文件: 写第一个和最后一个 4K 块
+        void* fill = nullptr;
+        ASSERT_EQ(posix_memalign(&fill, 4096, BLOCK_SIZE), 0);
+        memset(fill, 0, BLOCK_SIZE);
+        ssize_t ret;
+        ret = pwrite(fd, fill, BLOCK_SIZE, 0);
+        ASSERT_EQ(ret, (ssize_t)BLOCK_SIZE);
+        const size_t FILE_SIZE = 1024UL * 1024 * 1024;  // 1GB
+        ret = pwrite(fd, fill, BLOCK_SIZE, FILE_SIZE - BLOCK_SIZE);
+        ASSERT_EQ(ret, (ssize_t)BLOCK_SIZE);
+        free(fill);
+
+        void* buf = nullptr;
+        ASSERT_EQ(posix_memalign(&buf, 4096, BLOCK_SIZE), 0);
+        memset(buf, 'X', BLOCK_SIZE);
+
+        std::cout << "\n=== QD Batch Pipelined " << type << " (1GB prealloc, O_DIRECT, 4K) ===" << std::endl;
+        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  Avg(us)  |  BW(MB/s)" << std::endl;
+        std::cout << "  ------|-----------|-----------|-----------|-----------|-----------|----------" << std::endl;
+
+        for (int qd : qds) {
+            const size_t total_ops = (qd <= 16) ? 2000 : 10000;
+            std::vector<uint64_t> latencies(total_ops, 0);
+            std::atomic<size_t> submitted{0};
+            std::atomic<size_t> completed{0};
+            std::atomic<bool> stop{false};
+
+            auto t_start = std::chrono::steady_clock::now();
+
+            std::thread submitter([&]() {
+                while (submitted.load() < total_ops && !stop.load()) {
+                    while (submitted.load() - completed.load() < (size_t)qd
+                           && submitted.load() < total_ops) {
+                        size_t slot = submitted.fetch_add(1);
+                        uint64_t offset = (slot % 262144) * BLOCK_SIZE;
+                        uint64_t t0 = __builtin_ia32_rdtsc();
+
+                        IORequest req;
+                        req.op = IORequest::kWrite;
+                        req.fd = fd;
+                        req.offset = offset;
+                        req.buf = buf;
+                        req.len = BLOCK_SIZE;
+                        req.callback = [&, slot, t0](IOCompletion c) {
+                            if (c.result == (int64_t)BLOCK_SIZE)
+                                latencies[slot] = __builtin_ia32_rdtsc() - t0;
+                            completed.fetch_add(1);
+                        };
+                        w.io_backend()->submit(std::move(req));
+                    }
+                    _mm_pause();
+                }
+                stop.store(true);
+            });
+
+            while (completed.load() < total_ops) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            stop.store(true);
+            submitter.join();
+
+            auto t_end = std::chrono::steady_clock::now();
+            double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+
+            std::vector<uint64_t> valid;
+            for (auto v : latencies) if (v > 0) valid.push_back(v);
+            if (valid.empty()) { printf("  %-4d  |  %7s\n", qd, "no_data"); continue; }
+
+            std::sort(valid.begin(), valid.end());
+            double ghz = 3.0;
+            size_t n = valid.size();
+            uint64_t p50_ns = valid[n/2] / ghz;
+            uint64_t p99_ns = valid[n*99/100] / ghz;
+            uint64_t p999_ns = valid[n*999/1000] / ghz;
+            uint64_t avg_ns = std::accumulate(valid.begin(), valid.end(), 0ULL) / n / ghz;
+            double iops = total_ops / (elapsed_us / 1e6);
+            double bw_mbps = iops * BLOCK_SIZE / (1024.0 * 1024.0);
+
+            printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.0f\n",
+                   qd, iops/1000.0, p50_ns/1000.0, p99_ns/1000.0, p999_ns/1000.0, avg_ns/1000.0, bw_mbps);
+        }
+
+        w.stop(); w.join();
+        close(fd); unlink(path.c_str()); free(buf);
     }
 }
