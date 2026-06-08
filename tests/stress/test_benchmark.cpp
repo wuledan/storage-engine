@@ -8,10 +8,10 @@
 #include <cstdint>
 #include <iostream>
 #include <iomanip>
+#include <cstdio>
 #include <mutex>
 #include <x86intrin.h>
 #include <emmintrin.h>
-#include <numeric>
 #include <fcntl.h>
 #include <unistd.h>
 #include <folly/coro/BlockingWait.h>
@@ -896,4 +896,282 @@ TEST(BenchmarkIO, IoUringVsLibaio) {
         close(fd);
         unlink(path.c_str());
     }
+}
+
+// ===== IO Ping-Pong Mode =====
+// 每次提交一个 IO，等待完成后再提交下一个
+// 测量单请求无队列堆积的真实延迟
+
+TEST(BenchmarkIO, IoUringPingPong) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    w.init_io_backend({"io_uring", 256});
+    w.start();
+
+    const char* path = "/tmp/bench_io_pingpong";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+
+    const size_t N = 2000;
+    std::vector<uint64_t> latencies(N);
+    char buf[64] = "pingpong";
+
+    for (size_t i = 0; i < N; ++i) {
+        std::atomic<uint64_t> lat{0};
+        std::atomic<bool> done{false};
+
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        IORequest req;
+        req.op = IORequest::kWrite;
+        req.fd = fd;
+        req.offset = static_cast<uint64_t>(i) * 64;
+        req.buf = buf;
+        req.len = 64;
+        req.callback = [&done, &lat, t0](IOCompletion) {
+            lat.store(__builtin_ia32_rdtsc() - t0);
+            done.store(true);
+        };
+        w.io_backend()->submit(std::move(req));
+        w.notify();
+
+        while (!done.load()) { _mm_pause(); }
+        latencies[i] = lat.load();
+    }
+
+    w.stop();
+    w.join();
+    close(fd);
+    unlink(path);
+
+    std::sort(latencies.begin(), latencies.end());
+    double ghz = 3.0;
+
+    uint64_t avg_lat = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / N;
+
+    std::cout << "\n=== io_uring Ping-Pong Latency (serial, no queue depth) ===" << std::endl;
+    std::cout << "  P50:  " << (latencies[N/2] / ghz) << " ns" << std::endl;
+    std::cout << "  P99:  " << (latencies[N*99/100] / ghz) << " ns" << std::endl;
+    std::cout << "  P999: " << (latencies[N*999/1000] / ghz) << " ns" << std::endl;
+    std::cout << "  avg:  " << (avg_lat / ghz) << " ns" << std::endl;
+    std::cout << "  IOPS (serial): " << (1e9 / (avg_lat / ghz)) << " ops/s" << std::endl;
+}
+
+// libaio ping-pong（如果可用）
+TEST(BenchmarkIO, LibaioPingPong) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    IOBackendConfig io_cfg;
+    io_cfg.type = "libaio";
+    io_cfg.queue_depth = 64;
+
+    bool created = false;
+    try { w.init_io_backend(io_cfg); created = true; }
+    catch (...) {}
+
+    if (!created) {
+        std::cout << "[Bench] libaio not available, skipping LibaioPingPong" << std::endl;
+        return;
+    }
+    w.start();
+
+    const char* path = "/tmp/bench_libaio_pingpong";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+
+    const size_t N = 1000;
+    std::vector<uint64_t> latencies(N);
+    char buf[64] = "pingpong";
+
+    for (size_t i = 0; i < N; ++i) {
+        std::atomic<uint64_t> lat{0};
+        std::atomic<bool> done{false};
+        uint64_t t0 = __builtin_ia32_rdtsc();
+
+        IORequest req;
+        req.op = IORequest::kWrite;
+        req.fd = fd;
+        req.offset = static_cast<uint64_t>(i) * 64;
+        req.buf = buf;
+        req.len = 64;
+        req.callback = [&done, &lat, t0](IOCompletion) {
+            lat.store(__builtin_ia32_rdtsc() - t0);
+            done.store(true);
+        };
+        w.io_backend()->submit(std::move(req));
+        w.notify();
+
+        while (!done.load()) { _mm_pause(); }
+        latencies[i] = lat.load();
+    }
+
+    w.stop();
+    w.join();
+    close(fd);
+    unlink(path);
+
+    std::sort(latencies.begin(), latencies.end());
+    double ghz = 3.0;
+
+    uint64_t avg_lat = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / N;
+
+    std::cout << "\n=== libaio Ping-Pong Latency ===" << std::endl;
+    std::cout << "  P50:  " << (latencies[N/2] / ghz) << " ns" << std::endl;
+    std::cout << "  P99:  " << (latencies[N*99/100] / ghz) << " ns" << std::endl;
+    std::cout << "  avg:  " << (avg_lat / ghz) << " ns" << std::endl;
+}
+
+// io_uring vs libaio ping-pong 对比汇总
+TEST(BenchmarkIO, PingPongComparison) {
+    std::cout << "\n=== IO Ping-Pong Comparison ===" << std::endl;
+    std::cout << "  Mode:     submit 1 \xE2\x86\x92 wait \xE2\x86\x92 submit 1 (zero queue depth)" << std::endl;
+    std::cout << "  Previous: 292K IOPS (batch of 5000, P50=4.75us)" << std::endl;
+    std::cout << "  Expected ping-pong: < 3us P50 (single request, no contention)" << std::endl;
+}
+
+// ===== Multi Queue Depth Benchmark (SPDK-style) =====
+// 保持固定数量的 IO 在飞行中（depth-pipelined）
+// 测试不同 QD 下的 IOPS 和延迟分布
+
+struct QDResult {
+    int queue_depth;
+    double iops;
+    uint64_t p50_ns;
+    uint64_t p99_ns;
+    uint64_t p999_ns;
+    uint64_t avg_ns;
+};
+
+static QDResult run_qd_benchmark(OnlineWorker& w, int fd, int queue_depth, size_t total_ops) {
+    std::vector<uint64_t> latencies(total_ops);
+    std::atomic<size_t> submitted{0};
+    std::atomic<size_t> completed{0};
+    std::atomic<bool> stop{false};
+    char buf[64] = "qd_bench";
+
+    // 提交线程：保持 depth 个请求在飞行中
+    std::thread submitter([&]() {
+        while (!stop.load() && submitted.load() < total_ops) {
+            if (submitted.load() - completed.load() < static_cast<size_t>(queue_depth)) {
+                size_t slot = submitted.fetch_add(1);
+                if (slot >= total_ops) break;
+
+                uint64_t t0 = __builtin_ia32_rdtsc();
+                IORequest req;
+                req.op = IORequest::kWrite;
+                req.fd = fd;
+                req.offset = static_cast<uint64_t>(slot) * 64;
+                req.buf = buf;
+                req.len = 64;
+                req.callback = [&completed, &latencies, slot, t0](IOCompletion c) {
+                    if (c.result > 0) {
+                        latencies[slot] = __builtin_ia32_rdtsc() - t0;
+                    }
+                    completed.fetch_add(1);
+                };
+                w.io_backend()->submit(std::move(req));
+            } else {
+                _mm_pause();
+            }
+        }
+        stop.store(true);
+    });
+
+    while (completed.load() < total_ops) {
+        w.notify();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    stop.store(true);
+    submitter.join();
+
+    std::sort(latencies.begin(), latencies.end());
+    double ghz = 3.0;
+
+    QDResult r;
+    r.queue_depth = queue_depth;
+    uint64_t avg_lat = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / total_ops;
+    r.p50_ns = static_cast<uint64_t>(latencies[total_ops/2] / ghz);
+    r.p99_ns = static_cast<uint64_t>(latencies[total_ops*99/100] / ghz);
+    r.p999_ns = static_cast<uint64_t>(latencies[total_ops*999/1000] / ghz);
+    r.avg_ns = static_cast<uint64_t>(avg_lat / ghz);
+    r.iops = static_cast<double>(queue_depth) / (r.avg_ns / 1e9);
+    return r;
+}
+
+TEST(BenchmarkIO, QueueDepthScaling) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    w.init_io_backend({"io_uring", 256});
+    w.start();
+
+    const char* path = "/tmp/bench_qd_scaling";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+
+    std::vector<int> depths = {1, 4, 8, 16, 32, 64, 128, 256};
+    std::vector<QDResult> results;
+
+    std::cout << "\n=== io_uring Queue Depth Scaling (SPDK-style, pipelined) ===" << std::endl;
+    std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  Avg(us)" << std::endl;
+    std::cout << "  ------|-----------|-----------|-----------|-----------|----------" << std::endl;
+
+    for (int qd : depths) {
+        size_t ops = (qd <= 4) ? 2000 : 5000;
+        auto r = run_qd_benchmark(w, fd, qd, ops);
+        results.push_back(r);
+        double iops_k = r.iops / 1000.0;
+        printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.2f\n",
+               qd, iops_k, r.p50_ns/1000.0, r.p99_ns/1000.0, r.p999_ns/1000.0, r.avg_ns/1000.0);
+    }
+
+    w.stop();
+    w.join();
+    close(fd);
+    unlink(path);
+
+    EXPECT_GT(results.back().iops, results.front().iops);
+}
+
+TEST(BenchmarkIO, LibaioQueueDepthScaling) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    IOBackendConfig io_cfg;
+    io_cfg.type = "libaio";
+    io_cfg.queue_depth = 256;
+
+    bool created = false;
+    try { w.init_io_backend(io_cfg); created = true; }
+    catch (...) {}
+
+    if (!created) {
+        std::cout << "[Bench] libaio not available" << std::endl;
+        return;
+    }
+    w.start();
+
+    const char* path = "/tmp/bench_libaio_qd";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+
+    std::vector<int> depths = {1, 4, 8, 16, 32, 64};
+    std::vector<QDResult> results;
+
+    std::cout << "\n=== libaio Queue Depth Scaling (SPDK-style, pipelined) ===" << std::endl;
+    std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  Avg(us)" << std::endl;
+    std::cout << "  ------|-----------|-----------|-----------|-----------|----------" << std::endl;
+
+    for (int qd : depths) {
+        size_t ops = (qd <= 4) ? 2000 : 5000;
+        auto r = run_qd_benchmark(w, fd, qd, ops);
+        results.push_back(r);
+        double iops_k = r.iops / 1000.0;
+        printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.2f\n",
+               qd, iops_k, r.p50_ns/1000.0, r.p99_ns/1000.0, r.p999_ns/1000.0, r.avg_ns/1000.0);
+    }
+
+    w.stop();
+    w.join();
+    close(fd);
+    unlink(path);
+
+    EXPECT_GT(results.back().iops, results.front().iops);
 }
