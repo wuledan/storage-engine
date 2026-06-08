@@ -7,6 +7,50 @@
 > 计时：`__builtin_ia32_rdtsc` (纳秒精度)，转换公式 `ns = rdtsc / 3.0`
 > io_uring：内核 6.17 原生支持，max aio: 65536
 
+## 测试环境
+
+### 硬件
+
+| 组件 | 规格 |
+|------|------|
+| **CPU** | 2× Intel Xeon, 56 cores/socket, 112 threads total |
+| **NUMA** | 2 nodes (node0: 0-27,56-83; node1: 28-55,84-111) |
+| **内存** | 125 GiB total, DDR4 |
+| **系统盘** | Solidigm P41 Plus 2TB NVMe (nvme1n1, DRAM-less) |
+| **测试盘** | Solidigm P41 Plus 1TB NVMe (nvme0n1, DRAM-less, PCIe Gen4) |
+| **测试盘挂载** | `/mnt/nvme_test/`, ext4 |
+| **测试盘块大小** | 512B physical/logical |
+
+### 软件
+
+| 组件 | 版本 |
+|------|------|
+| **内核** | 6.17.0-29-generic |
+| **编译器** | GCC 13.2, C++20 |
+| **folly** | quant_invest prebuilt |
+| **liburing** | 系统自带, io_uring 内核支持 |
+| **libaio** | 系统自带, max aio-nr=65536 |
+| **fio** | 3.36 (基线参考) |
+| **构建** | CMake 3.20+, Release with `-O2 -g` |
+
+### 测试方法
+
+| 模式 | 路径 | 说明 |
+|------|------|------|
+| **fio 基线** | `fio --ioengine={libaio,io_uring} --direct=1 --rw=randwrite` | 裸 IO，无框架开销 |
+| **Mode 1 (同核协程)** | `SimpleCoro → enqueue_affine(P0) → co_await co_write → Scheduler poll → baton.post → resume` | 协程在 Worker 线程执行，零跨线程 |
+| **Mode 2 (跨线程)** | `测试线程 submit + spin → Scheduler poll → callback` | 跨线程提交，无协程路径 |
+| **QD 扩展** | 测试线程保持 QD 个 IO 在飞行中，Scheduler poll 收割 | SPDK-style pipelined |
+
+| 参数 | 值 |
+|------|-----|
+| **块大小** | 512B ~ 1M (12 档) |
+| **队列深度** | 1, 4, 16, 64, 128 |
+| **IO 模式** | O_DIRECT, randwrite |
+| **CPU 绑定** | cpu_id=1, 不跨 NUMA |
+| **后端** | io_uring (自适应提交阈值=4), libaio |
+| **测试盘路径** | `/mnt/nvme_test/bench_*` |
+
 ## 1. 队列吞吐量
 
 ### 1.1 LocalQueue（非原子，单线程）
