@@ -142,8 +142,19 @@ Engine 协程: 恢复 → 拿到 IOCompletion
 | io_uring syscall 数 | ~32/QD=128 | 1 | -97% |
 | 多提交者公平性 | 先到先填 ring | buffer 合并 | 更公平 |
 
-## 7. 待确认
+## 7. 待确认 → 已确认
 
-1. `submit_batch` 是否需要支持跨多个 Scheduler 的 io_uring 实例（per-worker 隔离）？
-2. buffer 合并时，priority 取最高还是平均？
-3. 单请求 `submit()` 在 buffer 为空时是否直接 fill SQE（跳过缓冲）以减少延迟？抑或统一走 buffer 以保证语义一致？
+1. **单请求缓冲**：单请求统一走 buffer，但 deadline=1 轮（即下一轮立刻 flush）。避免单请求被部分填充的 buffer 无限阻塞。
+2. **加权**：buffer 合并时，合并后的 priority 取各 buffer 的 `max(priority_i)`——不降级。调度时高优 buffer 先 flush。
+3. **跨 Worker 场景**：可能存在。Worker A 的协程恢复后需要向 Worker B 的 io_uring 提交 IO（例如数据跨 shard）。`submit_batch` 的目标 io_uring 实例与调用方 Worker 解耦。
+
+## 8. 最终实现计划
+
+| Task | 内容 | 工时 |
+|------|------|------|
+| B1 | `IOBatchingBackend` 类：buffer 管理 + deadline + 加权合并 | 3h |
+| B2 | `flush_pending()` 决策逻辑集成到 Scheduler | 2h |
+| B3 | `submit_batch()` API + 单请求 `submit()` 走 buffer(dl=1) | 2h |
+| B4 | 测试：6 个场景 (BatchExactQD/BatchPartialFlush/BatchOverflow/P0Preempt/MixedPriority/SingleRequest) | 3h |
+| B5 | 跨 Worker 场景桩（占位，后续 IO 层完善） | 1h |
+| **总计** | **5 任务** | **11h** |
