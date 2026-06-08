@@ -26,29 +26,31 @@ RPC Layer (DPDK/RDMA) → Consistency Layer → Pluggable Engine → IO Backend 
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| **Runtime** | ✔ 已实现 | Online (RTC) + Offline (Worker-Stealing) 协程调度 |
-| **IO Adapter** | 📋 设计中 | 可插拔的 io_uring / libaio / SPDK 后端 |
-| **RPC Layer** | ⏳ 待设计 | DPDK TCP / RDMA userspace 网络传输 |
-| **Consistency** | ⏳ 待设计 | 一致性协议层（Quorum / Consensus） |
-| **Pluggable Engine** | ⏳ 待设计 | 多引擎抽象接口（LSM / B+Tree / Bitcask） |
+| **Runtime** | ✔ | Online (RTC) + Offline (Worker-Stealing) 协程调度 |
+| **IO Adapter** | ✔ | io_uring / libaio / SPDK 可插拔后端 |
+| **Perf & Trace** | ✔ | 三级计数 + 纳秒直方图 + 请求级 Trace |
+| **Decision System** | ✔ | 排队论驱动的自适应 Dispatch 模式 |
+| **RPC Layer** | ⏳ | DPDK TCP / RDMA userspace |
+| **Consistency** | ⏳ | Quorum / Consensus |
+| **Pluggable Engine** | ⏳ | LSM / B+Tree / Bitcask |
 
 ### 关键特性
 
-- **零阻塞 IO 路径**：协程提交 → co_await 挂起 → IO 完成 → affine queue (P0) → 协程恢复，全程无系统调用
-- **自适应分发**：基于排队理论的容量分析，自动选择 Direct（per-worker NIC）或 Dispatch（独立 poller）模式
-- **三级计数系统**：PerfLevel kNone(0 开销) / kCount(~3指令) / kTrace(~12指令)，纳秒级延迟直方图
-- **Shared-Nothing**：每 Worker 独占 IO 队列、内存池、CPU 核心
+- **零阻塞 IO 路径**：co_await → io_uring submit → Scheduler poll → 回调 → AffinityBaton → affine queue (P0) → 协程恢复
+- **自适应分发**：排队理论容量分析，自动选择 Direct（per-worker NIC）或 Dispatch（独立 poller）
+- **三级计数**：PerfLevel kNone(0指令) / kCount(~3) / kTrace(~12)，rdtsc 纳秒精度
+- **Shared-Nothing**：每 Worker 独占 IO 队列、内存池、CPU + NUMA 绑定
 
 ## Benchmark 概要
 
 | 维度 | 数值 |
 |------|------|
-| 在线 Worker 批量吞吐 | 3.1 M ops/s |
-| 协程恢复延迟 (active) P50 | 982 ns |
-| 纯队列调度 P50 | 683 ns |
-| Worker 启动 P50 | 63 μs |
+| 协程跨线程恢复 (active) | 982 ns P50 |
+| io_uring QD=128 | 3.39 μs P50, 34.4M IOPS |
+| libaio QD=256 | 4.25 μs P50, 54.5M IOPS |
+| Worker 启动 | 63 μs P50 |
 
-完整 benchmark 报告：[docs/2026-06-08/08-benchmark-report.md](docs/2026-06-08/08-benchmark-report.md)
+完整报告：[docs/2026-06-08/08-benchmark-report.md](docs/2026-06-08/08-benchmark-report.md)
 
 ## 设计文档
 
@@ -58,7 +60,7 @@ RPC Layer (DPDK/RDMA) → Consistency Layer → Pluggable Engine → IO Backend 
 
 ```bash
 cmake -B build && cmake --build build
-ctest --test-dir build          # 154/154 pass
+ctest --test-dir build
 ```
 
-要求：GCC 13+, CMake 3.20+, folly, hwloc, GTest, jemalloc
+要求：GCC 13+, CMake 3.20+, folly, hwloc, GTest, jemalloc, liburing, libaio

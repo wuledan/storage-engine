@@ -133,18 +133,29 @@ void Worker::set_policy(std::unique_ptr<SchedulingPolicy> p) {
 void Worker::start() {
     scheduler_.reset_stop();
     thread_ = std::thread([this] {
+        if (cfg_.cpu_id > 0) {
+            // 线程内部绑定 CPU + NUMA 内存
+            hwloc_topology_t topo;
+            hwloc_topology_init(&topo);
+            hwloc_topology_load(topo);
+            
+            hwloc_cpuset_t cpuset = hwloc_bitmap_alloc();
+            hwloc_bitmap_set(cpuset, cfg_.cpu_id - 1);
+            hwloc_set_cpubind(topo, cpuset, HWLOC_CPUBIND_THREAD);
+            hwloc_bitmap_free(cpuset);
+            
+            if (cfg_.numa_node > 0) {
+                hwloc_bitmap_t nodeset = hwloc_bitmap_alloc();
+                hwloc_bitmap_set(nodeset, cfg_.numa_node - 1);
+                hwloc_set_membind(topo, nodeset,
+                                  HWLOC_MEMBIND_BIND,
+                                  HWLOC_MEMBIND_THREAD);
+                hwloc_bitmap_free(nodeset);
+            }
+            hwloc_topology_destroy(topo);
+        }
         worker_loop();
     });
-    if (cfg_.cpu_id > 0) {
-        hwloc_topology_t topo;
-        hwloc_topology_init(&topo);
-        hwloc_topology_load(topo);
-        hwloc_cpuset_t cpuset = hwloc_bitmap_alloc();
-        hwloc_bitmap_set(cpuset, cfg_.cpu_id - 1);
-        hwloc_set_cpubind(topo, cpuset, HWLOC_CPUBIND_THREAD);
-        hwloc_bitmap_free(cpuset);
-        hwloc_topology_destroy(topo);
-    }
 }
 
 void Worker::stop() {

@@ -1152,7 +1152,7 @@ TEST(BenchmarkIO, LibaioQueueDepthScaling) {
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
     ASSERT_GE(fd, 0);
 
-    std::vector<int> depths = {1, 4, 8, 16, 32, 64};
+    std::vector<int> depths = {1, 4, 8, 16, 32, 64, 128, 256};
     std::vector<QDResult> results;
 
     std::cout << "\n=== libaio Queue Depth Scaling (SPDK-style, pipelined) ===" << std::endl;
