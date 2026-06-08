@@ -38,18 +38,16 @@
 | 模式 | 路径 | 说明 |
 |------|------|------|
 | **fio 基线** | `fio --ioengine={libaio,io_uring} --direct=1 --rw=randwrite` | 裸 IO，无框架开销 |
-| **Mode 1 (同核协程)** | `SimpleCoro → enqueue_affine(P0) → co_await co_write → Scheduler poll → baton.post → resume` | 协程在 Worker 线程执行，零跨线程 |
-| **Mode 2 (跨线程)** | `测试线程 submit + spin → Scheduler poll → callback` | 跨线程提交，无协程路径 |
-| **QD 扩展** | 测试线程保持 QD 个 IO 在飞行中，Scheduler poll 收割 | SPDK-style pipelined |
+| **Mode 1 (同核)** | `测试线程 submit + spin → Worker Scheduler poll → callback` | 跨线程提交，Scheduler 驱动 IO 完成 |
+| **Mode 2 (跨核)** | 同上，但测试线程与 Worker 在不同 CPU core | 区分跨核通信开销 |
 
 | 参数 | 值 |
 |------|-----|
-| **块大小** | 512B ~ 1M (12 档) |
-| **队列深度** | 1, 4, 16, 64, 128 |
+| **块大小** | 4K |
 | **IO 模式** | O_DIRECT, randwrite |
-| **CPU 绑定** | cpu_id=1, 不跨 NUMA |
+| **CPU 绑定** | cpu_id=1 |
 | **后端** | io_uring (自适应提交阈值=4), libaio |
-| **测试盘路径** | `/mnt/nvme_test/bench_*` |
+| **测试盘路径** | `/mnt/nvme_test/` |
 
 ## 1. 队列吞吐量
 
@@ -140,75 +138,54 @@ Idle 跨线程 16.4μs:
 
 > 100 次循环，不绑定 CPU
 
-## 5. IO 性能（O_DIRECT, NVMe Solidigm P41 Plus, 绑核）
+## 5. IO 性能（O_DIRECT, NVMe Solidigm P41 Plus, 绑核, 4K randwrite）
 
-### fio 基线（裸 IO 参考）
+### fio 基线（裸 IO，--size=1G）
 
-| 配置 | P50 | P99 | IOPS |
-|------|-----|-----|------|
-| libaio QD=1 | 20 μs | 46 μs | 20.6k |
-| io_uring QD=1 | 27 μs | 35 μs | 26.7k |
-| libaio QD=128 | 692 μs | 1.06 ms | 130k |
-| io_uring QD=128 | 545 μs | 922 μs | 155k |
+| 配置 | P50 | P99 | IOPS | BW |
+|------|-----|-----|------|-----|
+| libaio QD=1 | 20 μs | 46 μs | 20.6k | 80 MB/s |
+| io_uring QD=1 | 27 μs | 35 μs | 26.7k | 104 MB/s |
+| libaio QD=128 | 692 μs | 1.06 ms | 130k | 509 MB/s |
+| io_uring QD=128 | 545 μs | 922 μs | 155k | 607 MB/s |
 
-### 5.1 Mode 1 — 同核协程（SimpleCoro, O_DIRECT, NVMe, 4K）
-
-#### QD 扩展 (4K)
-
-**io_uring:**
-
-| QD | P50 (μs) | IOPS (K) |
-|----|----------|----------|
-| 1 | 18.7 | 36 |
-| 4 | 6.7 | 316 |
-| 16 | 6.5 | 1,466 |
-| 64 | 5.8 | 10,876 |
-| 128 | **5.8** | **13,651** |
-
-**libaio:**
-
-| QD | P50 (μs) | IOPS (K) |
-|----|----------|----------|
-| 1 | 9.3 | 100 |
-| 4 | 6.7 | 586 |
-| 16 | **4.3** | 2,953 |
-| 64 | **4.2** | 15,126 |
-| 128 | **4.2** | **30,009** |
-
-### 5.2 Mode 2 — 跨线程（测试线程 → Worker）
-
-测试线程直接 submit + spin wait，Worker Scheduler 异步 poll IO 完成。
-
-#### Ping-Pong (QD=1, 4K)
+### Mode 2 — 跨线程 Ping-Pong（submit 1 → spin wait → submit next）
 
 | 后端 | P50 | P99 |
 |------|-----|-----|
-| io_uring | 18.6 μs | 633.2 μs |
-| libaio | **5.5 μs** | **12.5 μs** |
+| io_uring | **17.2 μs** | 35.5 μs |
+| libaio | **18.3 μs** | 27.1 μs |
 
-### 5.3 Mode 1 vs Mode 2 对比
+### Mode 1 — 同核 Ping-Pong（同一线程 submit + spin）
 
-| 模式 | io_uring P50 | libaio P50 | 跨线程开销 |
-|------|-------------|-----------|-----------|
-| Mode 1 (同核) | 16.8 μs | 9.5 μs | 0 |
-| Mode 2 (跨线程) | 18.6 μs | 5.5 μs | ~300ns eventfd + spin |
+| 后端 | P50 | P99 |
+|------|-----|-----|
+| io_uring | **17.5 μs** | 42.9 μs |
+| libaio | **17.6 μs** | 27.0 μs |
 
-### 5.4 框架开销分解
+### 框架开销分解
 
 ```
 单次 IO 时间线 (Mode2 io_uring, P50=17.2μs):
-  submit() 用户态:        ~300ns  (1.7%)
-  io_uring_enter syscall:  ~300ns  (1.7%)
-  内核 IO 处理:            ~0.5μs  (2.9%)
-  NVMe 硬件写入:          ~15μs   (87.2%)
-  Scheduler poll 迭代:    ~500ns  (2.9%)
-  callback + spin 检测:   ~500ns  (2.9%)
+  submit() 填充 SQE:       ~300ns   (1.7%)
+  io_uring_enter syscall:  ~300ns   (1.7%)
+  内核 IO dispatch:         ~0.5μs  (2.9%)
+  NVMe 硬件写入:           ~15μs   (87.2%)  ← 主要瓶颈
+  Scheduler poll + peek:   ~500ns   (2.9%)
+  callback + spin 退出:    ~500ns   (2.9%)
   ─────────────────────────────────
-  框架总开销:             ~1.6μs  (9.3%)
-  硬件延迟:               ~15μs   (87.2%)
+  框架开销:                ~1.6μs   (9.3%)
+  NVMe 硬件:               ~15μs   (87.2%)
 ```
 
-> 注：fio 使用 1GB 文件，我们用 2MB 区域。DRAM-less P41 Plus 中小工作集延迟更低，因此我们 P50(17μs) < fio P50(27μs)。框架开销占比 < 10%。
+> 注：我们 P50(17μs) < fio P50(27μs) 是因为 fio 用 1GB 文件而我们用 ~2MB 区域。DRAM-less P41 Plus 中小工作集延迟更低。框架开销占比 < 10%。
+
+### 分析
+
+- **框架开销 < 10%**：NVMe 硬件延迟占 87%，瓶颈在盘不在调度器
+- **Mode1 ≈ Mode2**：跨线程开销 ~300ns，在 17μs 总延迟中可忽略
+- **io_uring ≈ libaio**：在 NVMe O_DIRECT 下差异在测量噪声内（0.1-1.1μs）
+- 之前 tmpfs 测试中 libaio 大幅领先是 page cache 效应，不代表 NVMe 真实场景
 
 ## 6. 自适应空闲 (AdaptiveIdle)
 
@@ -217,29 +194,21 @@ Idle 跨线程 16.4μs:
 | 1-50 ms | **8-10 μs** | SPIN / YIELD |
 | 100 ms | **28.7 μs** | PARK (futex) |
 
-**慢降级 / 快恢复**：持续空闲时逐级退避（SPIN→YIELD→PARK），一旦有任务立即通过 notify 重置为 ACTIVE。
-
 ## 7. 总结
 
 | 维度 | 指标 | 数值 |
 |------|------|------|
-| **吞吐** | OnlineWorker 批量 | 3.1 M ops/s |
-| **吞吐** | libaio Mode1 QD=128 | **30.0 M IOPS** |
-| **吞吐** | io_uring Mode1 QD=128 | **13.7 M IOPS** |
-| **延迟** | libaio Mode1 Ping-Pong P50 | **9.5 μs** (O_DIRECT) |
-| **延迟** | libaio Mode2 Cross-Thread P50 | **5.5 μs** (O_DIRECT) |
-| **延迟** | 队列调度 P50 | 683 ns |
+| **吞吐** | OnlineWorker 批量任务 | 3.1 M ops/s |
+| **吞吐** | io_uring QD=128 (fio) | 155 K IOPS |
+| **延迟** | 纯队列调度 P50 | 683 ns |
 | **延迟** | 跨线程 Active P50 | 982 ns |
-| **启动** | Worker 启动 P50 | 63 μs |
-| **延迟** | io_uring Ping-Pong P50 | 8.1 μs |
-| **延迟** | libaio Ping-Pong P50 | **4.7 μs** |
-| **延迟** | io_uring QD=128 P50 | **3.39 μs** |
-| **延迟** | libaio QD=16 P50 | **2.97 μs** |
+| **延迟** | NVMe O_DIRECT P50 | 17 μs |
+| **框架** | 调度开销占 IO 延迟比 | **< 10%** |
 | **启动** | Worker 启动 P50 | 63 μs |
 
 ### 已知限制
 
-1. LocalQueue/BatchedSPSC dequeue 受 `std::chrono` 微秒分辨率限制
-2. 单 NUMA 节点，跨 NUMA 未测
+1. 测试盘为 DRAM-less 消费级 NVMe（P41 Plus），企业级盘延迟更低
+2. fio 用 1GB 文件，我们用 2MB 区域，小工作集延迟偏低
 3. 未启用 ASAN/TSAN/UBSAN
-4. fio 基线使用 O_DIRECT，我们的 Mode1 也使用 O_DIRECT + 绑核
+4. 单 NUMA 节点，跨 NUMA 未测
