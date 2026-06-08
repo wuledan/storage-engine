@@ -11,8 +11,12 @@
 #include <mutex>
 #include <x86intrin.h>
 #include <emmintrin.h>
+#include <numeric>
+#include <fcntl.h>
+#include <unistd.h>
 #include <folly/coro/BlockingWait.h>
 #include "runtime/local_queue.h"
+#include "io/io_engine.h"
 #include "runtime/batched_spsc_queue.h"
 #include "runtime/affine_work_queue.h"
 #include "runtime/scheduler.h"
@@ -24,6 +28,7 @@
 #include "runtime/online_group.h"
 
 using namespace storage::runtime;
+using namespace storage::io;
 
 // Test fixture: prints benchmark header
 class BenchmarkTest : public ::testing::Test {
@@ -729,4 +734,166 @@ TEST(BenchmarkDetail, CrossThreadIdleWorker) {
     std::cout << "  P999: " << (latencies[kSamples*999/1000] / ghz) << " ns" << std::endl;
 }
 
+// ============================================================================
+// Benchmark IO: io_uring 单线程 IOPS
+// ============================================================================
+TEST(BenchmarkIO, IoUringIOPs) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    w.init_io_backend({"io_uring", 256});
+    w.start();
 
+    const char* path = "/tmp/bench_io_uring";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+
+    const size_t N = 10000;
+    std::atomic<size_t> done{0};
+    char buf[64] = "bench_data";
+
+    auto t0 = std::chrono::steady_clock::now();
+
+    for (size_t i = 0; i < N; ++i) {
+        IORequest req;
+        req.op = IORequest::kWrite;
+        req.fd = fd;
+        req.offset = static_cast<uint64_t>(i) * 64;
+        req.buf = buf;
+        req.len = 64;
+        req.callback = [&done](IOCompletion) { done.fetch_add(1); };
+        w.io_backend()->submit(std::move(req));
+    }
+
+    while (done.load() < N) {
+        w.notify();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    double iops = N * 1e6 / us;
+
+    std::cout << "\n=== io_uring IOPS (single worker) ===" << std::endl;
+    std::cout << "  " << N << " writes in " << us << " us" << std::endl;
+    std::cout << "  IOPS: " << (iops / 1000.0) << " K ops/s" << std::endl;
+
+    w.stop();
+    w.join();
+    close(fd);
+    unlink(path);
+}
+
+// ============================================================================
+// Benchmark IO: io_uring 延迟分布
+// ============================================================================
+TEST(BenchmarkIO, IoUringLatency) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    w.init_io_backend({"io_uring", 256});
+    w.start();
+
+    const char* path = "/tmp/bench_io_lat";
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+
+    const size_t N = 5000;
+    std::vector<uint64_t> latencies(N);
+    std::atomic<size_t> idx{0};
+    char buf[64] = "lat_data";
+
+    for (size_t i = 0; i < N; ++i) {
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        size_t slot = i;
+
+        IORequest req;
+        req.op = IORequest::kWrite;
+        req.fd = fd;
+        req.offset = static_cast<uint64_t>(i) * 64;
+        req.buf = buf;
+        req.len = 64;
+        req.callback = [&latencies, &idx, slot, t0](IOCompletion) {
+            latencies[slot] = __builtin_ia32_rdtsc() - t0;
+            idx.fetch_add(1);
+        };
+        w.io_backend()->submit(std::move(req));
+    }
+
+    while (idx.load() < N) {
+        w.notify();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    w.stop();
+    w.join();
+    close(fd);
+    unlink(path);
+
+    std::sort(latencies.begin(), latencies.end());
+    double ghz = 3.0;
+
+    std::cout << "\n=== io_uring Write Latency (rdtsc, ns) ===" << std::endl;
+    std::cout << "  P50:  " << (latencies[N/2] / ghz) << " ns" << std::endl;
+    std::cout << "  P99:  " << (latencies[N*99/100] / ghz) << " ns" << std::endl;
+    std::cout << "  P999: " << (latencies[N*999/1000] / ghz) << " ns" << std::endl;
+    std::cout << "  avg:  " << (std::accumulate(latencies.begin(), latencies.end(), 0ULL) / N / ghz) << " ns" << std::endl;
+}
+
+// ============================================================================
+// Benchmark IO: io_uring 吞吐对比
+// ============================================================================
+TEST(BenchmarkIO, IoUringVsLibaio) {
+    for (const auto& type : {"io_uring"}) {
+        Worker::Config cfg;
+        OnlineWorker w(cfg);
+        IOBackendConfig io_cfg;
+        io_cfg.type = type;
+        io_cfg.queue_depth = 128;
+
+        bool created = false;
+        try { w.init_io_backend(io_cfg); created = true; }
+        catch (...) {}
+
+        if (!created) {
+            std::cout << "[Bench] " << type << " not available" << std::endl;
+            continue;
+        }
+        w.start();
+
+        std::string path = "/tmp/bench_" + std::string(type);
+        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ASSERT_GE(fd, 0);
+
+        const size_t N = 5000;
+        std::atomic<size_t> done{0};
+        char buf[64] = "cmp";
+
+        auto t0 = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < N; ++i) {
+            IORequest req;
+            req.op = IORequest::kWrite;
+            req.fd = fd;
+            req.offset = static_cast<uint64_t>(i) * 64;
+            req.buf = buf;
+            req.len = 64;
+            req.callback = [&done](IOCompletion) { done.fetch_add(1); };
+            w.io_backend()->submit(std::move(req));
+        }
+
+        while (done.load() < N) {
+            w.notify();
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+        double iops = N * 1e6 / us;
+
+        std::cout << "\n=== " << type << " IOPS ===" << std::endl;
+        std::cout << "  " << N << " writes in " << us << " us" << std::endl;
+        std::cout << "  IOPS: " << (iops / 1000.0) << " K ops/s" << std::endl;
+
+        w.stop();
+        w.join();
+        close(fd);
+        unlink(path.c_str());
+    }
+}

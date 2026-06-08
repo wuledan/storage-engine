@@ -23,4 +23,47 @@ function(add_stress_test TEST_NAME TEST_SOURCE)
 endfunction()
 
 add_stress_test(test_stress     test_stress.cpp)
-add_stress_test(test_benchmark  test_benchmark.cpp)
+
+# Benchmark test (also links io for IO benchmarks)
+add_executable(test_benchmark test_benchmark.cpp)
+target_link_libraries(test_benchmark
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+if(LIBURING)
+    target_link_libraries(test_benchmark PRIVATE ${LIBURING})
+endif()
+target_include_directories(test_benchmark PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_benchmark PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_benchmark)
+include(GoogleTest)
+gtest_discover_tests(test_benchmark)
+
+# IO stress test (links io + runtime + uring)
+add_executable(test_io_stress test_io_stress.cpp)
+target_link_libraries(test_io_stress
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+if(LIBURING)
+    target_link_libraries(test_io_stress PRIVATE ${LIBURING})
+endif()
+target_include_directories(test_io_stress PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_io_stress PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_io_stress)
+include(GoogleTest)
+gtest_discover_tests(test_io_stress)
