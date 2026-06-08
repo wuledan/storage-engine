@@ -49,6 +49,7 @@ folly::coro::Task<void> Scheduler::run() {
     while (running_.load(std::memory_order_acquire)) {
         // 每次循环先轮询 IO 完成事件（即使队列为空或 idle）
         if (io_backend_) {
+            io_backend_->flush_submissions();  // 批量提交所有待处理 SQE
             storage::io::IOCompletion io_comps[64];
             size_t io_n = io_backend_->poll(io_comps, 64);
             for (size_t j = 0; j < io_n; ++j) {

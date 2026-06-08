@@ -15,6 +15,7 @@ public:
     std::string_view name() const noexcept override { return "io_uring"; }
 
     void submit(IORequest req) override;
+    void flush_submissions();  // 批量提交所有待处理 SQE
     size_t poll(IOCompletion* out, size_t max) override;
 
 private:

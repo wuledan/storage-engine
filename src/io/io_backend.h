@@ -24,6 +24,7 @@ public:
 
     // 提交 IO 请求（非阻塞）
     virtual void submit(IORequest req) = 0;
+    virtual void flush_submissions() {}  // 默认空操作
 
     // 轮询 IO 完成事件（非阻塞，返回实际完成数）
     virtual size_t poll(IOCompletion* out, size_t max) = 0;

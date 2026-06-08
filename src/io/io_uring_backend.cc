@@ -30,10 +30,10 @@ IOUringBackend::~IOUringBackend() {
 void IOUringBackend::submit(IORequest req) {
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe) {
+        // SQ 满 → 先提交一次腾空间，稍后 Scheduler::poll 会统一 flush
         io_uring_submit(&ring_);
         sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
-            // 队列满且无法腾出空间 → 通过 callback 通知错误
             if (req.callback) {
                 IOCompletion comp;
                 comp.result = -ENOBUFS;
@@ -58,22 +58,18 @@ void IOUringBackend::submit(IORequest req) {
         break;
     case IORequest::kWrite:
         io_uring_prep_write(sqe, pending_[idx].fd,
-                            pending_[idx].buf, pending_[idx].len,
-                            pending_[idx].offset);
+                             pending_[idx].buf, pending_[idx].len,
+                             pending_[idx].offset);
         break;
     default:
         break;
     }
     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(idx));
+    // 不在此处 submit —— Scheduler::poll 统一批量提交
+}
 
-    int ret = io_uring_submit(&ring_);
-    if (ret < 0 && pending_[idx].callback) {
-        // io_uring_submit 失败，通过 callback 通知
-        IOCompletion comp;
-        comp.result = ret;
-        comp.callback = std::move(pending_[idx].callback);
-        comp.callback(comp);
-    }
+void IOUringBackend::flush_submissions() {
+    io_uring_submit(&ring_);
 }
 
 size_t IOUringBackend::poll(IOCompletion* out, size_t max) {
