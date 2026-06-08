@@ -6,7 +6,7 @@ OnlineWorkerGroup::OnlineWorkerGroup(const Config& cfg)
     : cfg_(cfg) {
     for (size_t i = 0; i < cfg_.num_workers; ++i) {
         Worker::Config wcfg;
-        wcfg.cpu_id = cfg_.base_cpu_id + static_cast<uint32_t>(i);
+        wcfg.cpu_id = cfg_.base_cpu_id + static_cast<uint32_t>(i) + 1;
         wcfg.numa_node = 0;
         wcfg.policy_cfg.name = "strict_priority";
         workers_.push_back(std::make_unique<OnlineWorker>(wcfg));

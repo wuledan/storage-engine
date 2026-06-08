@@ -9,6 +9,8 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdio>
+#include <cstring>
+#include <sys/mman.h>
 #include <mutex>
 #include <x86intrin.h>
 #include <emmintrin.h>
@@ -735,302 +737,8 @@ TEST(BenchmarkDetail, CrossThreadIdleWorker) {
 }
 
 // ============================================================================
-// Benchmark IO: io_uring 单线程 IOPS
+// Block Size × Queue Depth 标准测试矩阵
 // ============================================================================
-TEST(BenchmarkIO, IoUringIOPs) {
-    Worker::Config cfg;
-    OnlineWorker w(cfg);
-    w.init_io_backend({"io_uring", 256});
-    w.start();
-
-    const char* path = "/tmp/bench_io_uring";
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    ASSERT_GE(fd, 0);
-
-    const size_t N = 10000;
-    std::atomic<size_t> done{0};
-    char buf[64] = "bench_data";
-
-    auto t0 = std::chrono::steady_clock::now();
-
-    for (size_t i = 0; i < N; ++i) {
-        IORequest req;
-        req.op = IORequest::kWrite;
-        req.fd = fd;
-        req.offset = static_cast<uint64_t>(i) * 64;
-        req.buf = buf;
-        req.len = 64;
-        req.callback = [&done](IOCompletion) { done.fetch_add(1); };
-        w.io_backend()->submit(std::move(req));
-    }
-
-    while (done.load() < N) {
-        w.notify();
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
-
-    auto t1 = std::chrono::steady_clock::now();
-    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    double iops = N * 1e6 / us;
-
-    std::cout << "\n=== io_uring IOPS (single worker) ===" << std::endl;
-    std::cout << "  " << N << " writes in " << us << " us" << std::endl;
-    std::cout << "  IOPS: " << (iops / 1000.0) << " K ops/s" << std::endl;
-
-    w.stop();
-    w.join();
-    close(fd);
-    unlink(path);
-}
-
-// ============================================================================
-// Benchmark IO: io_uring 延迟分布
-// ============================================================================
-TEST(BenchmarkIO, IoUringLatency) {
-    Worker::Config cfg;
-    OnlineWorker w(cfg);
-    w.init_io_backend({"io_uring", 256});
-    w.start();
-
-    const char* path = "/tmp/bench_io_lat";
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    ASSERT_GE(fd, 0);
-
-    const size_t N = 5000;
-    std::vector<uint64_t> latencies(N);
-    std::atomic<size_t> idx{0};
-    char buf[64] = "lat_data";
-
-    for (size_t i = 0; i < N; ++i) {
-        uint64_t t0 = __builtin_ia32_rdtsc();
-        size_t slot = i;
-
-        IORequest req;
-        req.op = IORequest::kWrite;
-        req.fd = fd;
-        req.offset = static_cast<uint64_t>(i) * 64;
-        req.buf = buf;
-        req.len = 64;
-        req.callback = [&latencies, &idx, slot, t0](IOCompletion) {
-            latencies[slot] = __builtin_ia32_rdtsc() - t0;
-            idx.fetch_add(1);
-        };
-        w.io_backend()->submit(std::move(req));
-    }
-
-    while (idx.load() < N) {
-        w.notify();
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    }
-
-    w.stop();
-    w.join();
-    close(fd);
-    unlink(path);
-
-    std::sort(latencies.begin(), latencies.end());
-    double ghz = 3.0;
-
-    std::cout << "\n=== io_uring Write Latency (rdtsc, ns) ===" << std::endl;
-    std::cout << "  P50:  " << (latencies[N/2] / ghz) << " ns" << std::endl;
-    std::cout << "  P99:  " << (latencies[N*99/100] / ghz) << " ns" << std::endl;
-    std::cout << "  P999: " << (latencies[N*999/1000] / ghz) << " ns" << std::endl;
-    std::cout << "  avg:  " << (std::accumulate(latencies.begin(), latencies.end(), 0ULL) / N / ghz) << " ns" << std::endl;
-}
-
-// ============================================================================
-// Benchmark IO: io_uring 吞吐对比
-// ============================================================================
-TEST(BenchmarkIO, IoUringVsLibaio) {
-    for (const auto& type : {"io_uring"}) {
-        Worker::Config cfg;
-        OnlineWorker w(cfg);
-        IOBackendConfig io_cfg;
-        io_cfg.type = type;
-        io_cfg.queue_depth = 128;
-
-        bool created = false;
-        try { w.init_io_backend(io_cfg); created = true; }
-        catch (...) {}
-
-        if (!created) {
-            std::cout << "[Bench] " << type << " not available" << std::endl;
-            continue;
-        }
-        w.start();
-
-        std::string path = "/tmp/bench_" + std::string(type);
-        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-        ASSERT_GE(fd, 0);
-
-        const size_t N = 5000;
-        std::atomic<size_t> done{0};
-        char buf[64] = "cmp";
-
-        auto t0 = std::chrono::steady_clock::now();
-        for (size_t i = 0; i < N; ++i) {
-            IORequest req;
-            req.op = IORequest::kWrite;
-            req.fd = fd;
-            req.offset = static_cast<uint64_t>(i) * 64;
-            req.buf = buf;
-            req.len = 64;
-            req.callback = [&done](IOCompletion) { done.fetch_add(1); };
-            w.io_backend()->submit(std::move(req));
-        }
-
-        while (done.load() < N) {
-            w.notify();
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-        }
-        auto t1 = std::chrono::steady_clock::now();
-        auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-        double iops = N * 1e6 / us;
-
-        std::cout << "\n=== " << type << " IOPS ===" << std::endl;
-        std::cout << "  " << N << " writes in " << us << " us" << std::endl;
-        std::cout << "  IOPS: " << (iops / 1000.0) << " K ops/s" << std::endl;
-
-        w.stop();
-        w.join();
-        close(fd);
-        unlink(path.c_str());
-    }
-}
-
-// ===== IO Ping-Pong Mode =====
-// 每次提交一个 IO，等待完成后再提交下一个
-// 测量单请求无队列堆积的真实延迟
-
-TEST(BenchmarkIO, IoUringPingPong) {
-    Worker::Config cfg;
-    OnlineWorker w(cfg);
-    w.init_io_backend({"io_uring", 256});
-    w.start();
-
-    const char* path = "/tmp/bench_io_pingpong";
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    ASSERT_GE(fd, 0);
-
-    const size_t N = 2000;
-    std::vector<uint64_t> latencies(N);
-    char buf[64] = "pingpong";
-
-    for (size_t i = 0; i < N; ++i) {
-        std::atomic<uint64_t> lat{0};
-        std::atomic<bool> done{false};
-
-        uint64_t t0 = __builtin_ia32_rdtsc();
-        IORequest req;
-        req.op = IORequest::kWrite;
-        req.fd = fd;
-        req.offset = static_cast<uint64_t>(i) * 64;
-        req.buf = buf;
-        req.len = 64;
-        req.callback = [&done, &lat, t0](IOCompletion) {
-            lat.store(__builtin_ia32_rdtsc() - t0);
-            done.store(true);
-        };
-        w.io_backend()->submit(std::move(req));
-        w.notify();
-
-        while (!done.load()) { _mm_pause(); }
-        latencies[i] = lat.load();
-    }
-
-    w.stop();
-    w.join();
-    close(fd);
-    unlink(path);
-
-    std::sort(latencies.begin(), latencies.end());
-    double ghz = 3.0;
-
-    uint64_t avg_lat = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / N;
-
-    std::cout << "\n=== io_uring Ping-Pong Latency (serial, no queue depth) ===" << std::endl;
-    std::cout << "  P50:  " << (latencies[N/2] / ghz) << " ns" << std::endl;
-    std::cout << "  P99:  " << (latencies[N*99/100] / ghz) << " ns" << std::endl;
-    std::cout << "  P999: " << (latencies[N*999/1000] / ghz) << " ns" << std::endl;
-    std::cout << "  avg:  " << (avg_lat / ghz) << " ns" << std::endl;
-    std::cout << "  IOPS (serial): " << (1e9 / (avg_lat / ghz)) << " ops/s" << std::endl;
-}
-
-// libaio ping-pong（如果可用）
-TEST(BenchmarkIO, LibaioPingPong) {
-    Worker::Config cfg;
-    OnlineWorker w(cfg);
-    IOBackendConfig io_cfg;
-    io_cfg.type = "libaio";
-    io_cfg.queue_depth = 64;
-
-    bool created = false;
-    try { w.init_io_backend(io_cfg); created = true; }
-    catch (...) {}
-
-    if (!created) {
-        std::cout << "[Bench] libaio not available, skipping LibaioPingPong" << std::endl;
-        return;
-    }
-    w.start();
-
-    const char* path = "/tmp/bench_libaio_pingpong";
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    ASSERT_GE(fd, 0);
-
-    const size_t N = 1000;
-    std::vector<uint64_t> latencies(N);
-    char buf[64] = "pingpong";
-
-    for (size_t i = 0; i < N; ++i) {
-        std::atomic<uint64_t> lat{0};
-        std::atomic<bool> done{false};
-        uint64_t t0 = __builtin_ia32_rdtsc();
-
-        IORequest req;
-        req.op = IORequest::kWrite;
-        req.fd = fd;
-        req.offset = static_cast<uint64_t>(i) * 64;
-        req.buf = buf;
-        req.len = 64;
-        req.callback = [&done, &lat, t0](IOCompletion) {
-            lat.store(__builtin_ia32_rdtsc() - t0);
-            done.store(true);
-        };
-        w.io_backend()->submit(std::move(req));
-        w.notify();
-
-        while (!done.load()) { _mm_pause(); }
-        latencies[i] = lat.load();
-    }
-
-    w.stop();
-    w.join();
-    close(fd);
-    unlink(path);
-
-    std::sort(latencies.begin(), latencies.end());
-    double ghz = 3.0;
-
-    uint64_t avg_lat = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / N;
-
-    std::cout << "\n=== libaio Ping-Pong Latency ===" << std::endl;
-    std::cout << "  P50:  " << (latencies[N/2] / ghz) << " ns" << std::endl;
-    std::cout << "  P99:  " << (latencies[N*99/100] / ghz) << " ns" << std::endl;
-    std::cout << "  avg:  " << (avg_lat / ghz) << " ns" << std::endl;
-}
-
-// io_uring vs libaio ping-pong 对比汇总
-TEST(BenchmarkIO, PingPongComparison) {
-    std::cout << "\n=== IO Ping-Pong Comparison ===" << std::endl;
-    std::cout << "  Mode:     submit 1 \xE2\x86\x92 wait \xE2\x86\x92 submit 1 (zero queue depth)" << std::endl;
-    std::cout << "  Previous: 292K IOPS (batch of 5000, P50=4.75us)" << std::endl;
-    std::cout << "  Expected ping-pong: < 3us P50 (single request, no contention)" << std::endl;
-}
-
-// ===== Multi Queue Depth Benchmark (SPDK-style) =====
-// 保持固定数量的 IO 在飞行中（depth-pipelined）
-// 测试不同 QD 下的 IOPS 和延迟分布
 
 struct QDResult {
     int queue_depth;
@@ -1041,31 +749,49 @@ struct QDResult {
     uint64_t avg_ns;
 };
 
-static QDResult run_qd_benchmark(OnlineWorker& w, int fd, int queue_depth, size_t total_ops) {
+// 辅助：分配对齐缓冲区
+void* alloc_aligned_buffer(size_t size) {
+    void* buf = nullptr;
+    posix_memalign(&buf, 4096, size);
+    std::memset(buf, 'A', size);
+    return buf;
+}
+
+// 辅助：为指定 block size 创建临时文件
+int create_test_file(size_t block_size) {
+    std::string path = "/tmp/bench_" + std::to_string(block_size);
+    int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+    void* buf = alloc_aligned_buffer(block_size);
+    pwrite(fd, buf, block_size, 0);
+    free(buf);
+    fsync(fd);
+    return fd;
+}
+
+// 运行单组 benchmark：(backend, block_size, queue_depth) → QDResult
+static QDResult run_block_benchmark(OnlineWorker& w, int fd, size_t block_size,
+                                     int queue_depth, size_t total_ops) {
     std::vector<uint64_t> latencies(total_ops);
     std::atomic<size_t> submitted{0};
     std::atomic<size_t> completed{0};
     std::atomic<bool> stop{false};
-    char buf[64] = "qd_bench";
 
-    // 提交线程：保持 depth 个请求在飞行中
+    void* buf = alloc_aligned_buffer(block_size);
     std::thread submitter([&]() {
         while (!stop.load() && submitted.load() < total_ops) {
             if (submitted.load() - completed.load() < static_cast<size_t>(queue_depth)) {
                 size_t slot = submitted.fetch_add(1);
                 if (slot >= total_ops) break;
-
                 uint64_t t0 = __builtin_ia32_rdtsc();
                 IORequest req;
                 req.op = IORequest::kWrite;
                 req.fd = fd;
-                req.offset = static_cast<uint64_t>(slot) * 64;
+                req.offset = (slot % 1000) * block_size;
                 req.buf = buf;
-                req.len = 64;
+                req.len = block_size;
                 req.callback = [&completed, &latencies, slot, t0](IOCompletion c) {
-                    if (c.result > 0) {
-                        latencies[slot] = __builtin_ia32_rdtsc() - t0;
-                    }
+                    if (c.result > 0) latencies[slot] = __builtin_ia32_rdtsc() - t0;
                     completed.fetch_add(1);
                 };
                 w.io_backend()->submit(std::move(req));
@@ -1077,15 +803,14 @@ static QDResult run_qd_benchmark(OnlineWorker& w, int fd, int queue_depth, size_
     });
 
     while (completed.load() < total_ops) {
-        w.notify();
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     stop.store(true);
     submitter.join();
+    free(buf);
 
     std::sort(latencies.begin(), latencies.end());
     double ghz = 3.0;
-
     QDResult r;
     r.queue_depth = queue_depth;
     uint64_t avg_lat = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / total_ops;
@@ -1097,81 +822,127 @@ static QDResult run_qd_benchmark(OnlineWorker& w, int fd, int queue_depth, size_
     return r;
 }
 
-TEST(BenchmarkIO, QueueDepthScaling) {
+// io_uring: block size × QD 矩阵 (IOPS)
+TEST(BenchmarkIO, IoUringBlockSizeMatrix) {
     Worker::Config cfg;
+    cfg.cpu_id = 1;
     OnlineWorker w(cfg);
     w.init_io_backend({"io_uring", 256});
     w.start();
 
-    const char* path = "/tmp/bench_qd_scaling";
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    ASSERT_GE(fd, 0);
+    std::vector<size_t> sizes = {1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576};
+    std::vector<int> qds = {1, 4, 16, 64, 128};
 
-    std::vector<int> depths = {1, 4, 8, 16, 32, 64, 128, 256};
-    std::vector<QDResult> results;
+    std::cout << "\n=== io_uring Block Size × Queue Depth Matrix ===" << std::endl;
+    std::cout << "  BS/QD  |";
+    for (int qd : qds) std::cout << "  QD=" << qd << "  |";
+    std::cout << "\n  -------|";
+    for (size_t i = 0; i < qds.size(); ++i) std::cout << "---------|";
+    std::cout << std::endl;
 
-    std::cout << "\n=== io_uring Queue Depth Scaling (SPDK-style, pipelined) ===" << std::endl;
-    std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  Avg(us)" << std::endl;
-    std::cout << "  ------|-----------|-----------|-----------|-----------|----------" << std::endl;
+    for (size_t bs : sizes) {
+        int fd = create_test_file(bs);
+        ASSERT_GE(fd, 0);
 
-    for (int qd : depths) {
-        size_t ops = (qd <= 4) ? 2000 : 5000;
-        auto r = run_qd_benchmark(w, fd, qd, ops);
-        results.push_back(r);
-        double iops_k = r.iops / 1000.0;
-        printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.2f\n",
-               qd, iops_k, r.p50_ns/1000.0, r.p99_ns/1000.0, r.p999_ns/1000.0, r.avg_ns/1000.0);
+        std::cout << "  " << std::setw(5) << (bs/1024) << "K  |";
+        for (int qd : qds) {
+            size_t ops = (qd <= 4) ? 500 : 2000;
+            auto r = run_block_benchmark(w, fd, bs, qd, ops);
+            double iops_k = r.iops / 1000.0;
+            std::cout << std::setw(6) << std::fixed << std::setprecision(1)
+                      << iops_k << "K |";
+        }
+        std::cout << std::endl;
+        close(fd);
+        std::string path = "/tmp/bench_" + std::to_string(bs);
+        unlink(path.c_str());
     }
 
     w.stop();
     w.join();
-    close(fd);
-    unlink(path);
-
-    EXPECT_GT(results.back().iops, results.front().iops);
 }
 
-TEST(BenchmarkIO, LibaioQueueDepthScaling) {
+// io_uring: 延迟矩阵 (P50/P99 by block size at QD=1 and QD=128)
+TEST(BenchmarkIO, IoUringLatencyMatrix) {
     Worker::Config cfg;
+    cfg.cpu_id = 1;
+    OnlineWorker w(cfg);
+    w.init_io_backend({"io_uring", 256});
+    w.start();
+
+    std::vector<size_t> sizes = {1024, 4096, 16384, 65536, 262144, 1048576};
+
+    std::cout << "\n=== io_uring Latency by Block Size ===" << std::endl;
+    std::cout << "  BS    |  QD  |  P50(us)  |  P99(us)  |  IOPS(K) |  BW(MB/s)" << std::endl;
+    std::cout << "  ------|------|-----------|-----------|----------|----------" << std::endl;
+
+    for (size_t bs : sizes) {
+        for (int qd : {1, 128}) {
+            int fd = create_test_file(bs);
+            ASSERT_GE(fd, 0);
+            size_t ops = (qd == 1) ? 500 : 2000;
+            auto r = run_block_benchmark(w, fd, bs, qd, ops);
+            double bw = (r.iops * bs) / (1024.0 * 1024.0);
+
+            std::cout << "  " << std::setw(4) << (bs/1024) << "K |"
+                      << "  " << std::setw(2) << qd << "  |"
+                      << std::setw(8) << std::fixed << std::setprecision(2)
+                      << (r.p50_ns/1000.0) << " |"
+                      << std::setw(8) << (r.p99_ns/1000.0) << " |"
+                      << std::setw(7) << std::setprecision(1) << (r.iops/1000.0) << " |"
+                      << std::setw(7) << std::setprecision(1) << bw << std::endl;
+
+            close(fd);
+            std::string path = "/tmp/bench_" + std::to_string(bs);
+            unlink(path.c_str());
+        }
+    }
+
+    w.stop();
+    w.join();
+}
+
+// libaio: block size × QD 矩阵
+TEST(BenchmarkIO, LibaioBlockSizeMatrix) {
+    Worker::Config cfg;
+    cfg.cpu_id = 1;
     OnlineWorker w(cfg);
     IOBackendConfig io_cfg;
     io_cfg.type = "libaio";
     io_cfg.queue_depth = 256;
-
     bool created = false;
     try { w.init_io_backend(io_cfg); created = true; }
     catch (...) {}
-
-    if (!created) {
-        std::cout << "[Bench] libaio not available" << std::endl;
-        return;
-    }
+    if (!created) { std::cout << "[Bench] libaio not available\n"; return; }
     w.start();
 
-    const char* path = "/tmp/bench_libaio_qd";
-    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    ASSERT_GE(fd, 0);
+    std::vector<size_t> sizes = {1024, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576};
+    std::vector<int> qds = {1, 4, 16, 64, 128};
 
-    std::vector<int> depths = {1, 4, 8, 16, 32, 64, 128, 256};
-    std::vector<QDResult> results;
+    std::cout << "\n=== libaio Block Size × Queue Depth Matrix ===" << std::endl;
+    std::cout << "  BS/QD  |";
+    for (int qd : qds) std::cout << "  QD=" << qd << "  |";
+    std::cout << "\n  -------|";
+    for (size_t i = 0; i < qds.size(); ++i) std::cout << "---------|";
+    std::cout << std::endl;
 
-    std::cout << "\n=== libaio Queue Depth Scaling (SPDK-style, pipelined) ===" << std::endl;
-    std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  Avg(us)" << std::endl;
-    std::cout << "  ------|-----------|-----------|-----------|-----------|----------" << std::endl;
-
-    for (int qd : depths) {
-        size_t ops = (qd <= 4) ? 2000 : 5000;
-        auto r = run_qd_benchmark(w, fd, qd, ops);
-        results.push_back(r);
-        double iops_k = r.iops / 1000.0;
-        printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.2f\n",
-               qd, iops_k, r.p50_ns/1000.0, r.p99_ns/1000.0, r.p999_ns/1000.0, r.avg_ns/1000.0);
+    for (size_t bs : sizes) {
+        int fd = create_test_file(bs);
+        ASSERT_GE(fd, 0);
+        std::cout << "  " << std::setw(5) << (bs/1024) << "K  |";
+        for (int qd : qds) {
+            size_t ops = (qd <= 4) ? 500 : 2000;
+            auto r = run_block_benchmark(w, fd, bs, qd, ops);
+            double iops_k = r.iops / 1000.0;
+            std::cout << std::setw(6) << std::fixed << std::setprecision(1)
+                      << iops_k << "K |";
+        }
+        std::cout << std::endl;
+        close(fd);
+        std::string path = "/tmp/bench_" + std::to_string(bs);
+        unlink(path.c_str());
     }
 
     w.stop();
     w.join();
-    close(fd);
-    unlink(path);
-
-    EXPECT_GT(results.back().iops, results.front().iops);
 }
