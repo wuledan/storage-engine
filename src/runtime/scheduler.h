@@ -3,6 +3,7 @@
 #include "scheduling_policy.h"
 #include "adaptive_idle.h"
 #include "work_item.h"
+#include "worker_perf.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -23,6 +24,7 @@ public:
 
     void set_policy(SchedulingPolicy* policy) noexcept { policy_ = policy; }
     void set_idle(AdaptiveIdle* idle) noexcept { idle_ = idle; }
+    void set_perf(WorkerPerf* perf) noexcept { perf_ = perf; }
     void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
 
     const SchedulerStats& stats() const noexcept { return stats_; }
@@ -32,6 +34,7 @@ private:
     std::vector<std::unique_ptr<WorkQueue>> queues_;
     SchedulingPolicy* policy_;
     AdaptiveIdle* idle_;
+    WorkerPerf* perf_{nullptr};
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     SchedulerStats stats_;

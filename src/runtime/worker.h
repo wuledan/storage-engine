@@ -3,6 +3,7 @@
 #include "adaptive_idle.h"
 #include "scheduling_policy.h"
 #include "policy_factory.h"
+#include "worker_perf.h"
 #include "adapt/object_pool.h"
 #include "adapt/memory_pool.h"
 #include <atomic>
@@ -46,6 +47,10 @@ public:
     // 公开队列访问，供外部轮询器和测试使用
     WorkQueue* get_queue(size_t idx) const { return scheduler_.get_queue(idx); }
 
+    // ── 性能计数 ──
+    WorkerPerf& perf() { return perf_; }
+    void set_perf_level(PerfLevel lv) { perf_.set_level(lv); }
+
 protected:
     Scheduler& scheduler() { return scheduler_; }
     AdaptiveIdle& idle() { return *idle_; }
@@ -78,6 +83,8 @@ private:
     // 每 worker 独立的共享 nothing 内存池
     std::unique_ptr<adapt::QuantMemoryResource> mem_pool_;
     std::unique_ptr<adapt::ObjectPool<WorkItem>> work_item_pool_;
+
+    WorkerPerf perf_;  // 性能计数（初始化时传递 id_）
 };
 
 }  // namespace storage::runtime

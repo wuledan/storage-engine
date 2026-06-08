@@ -45,6 +45,7 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
 }
 
 void OnlineWorker::submit_engine(WorkItem item) {
+    item.enqueue_ns = perf().record_enqueue(QueueType::kEngine, item.trace_id);
     auto* q = static_cast<BatchedSPSCWorkQueue*>(get_queue(idx_engine_));
     if (q) {
         q->push_batch(&item, 1);
@@ -52,6 +53,7 @@ void OnlineWorker::submit_engine(WorkItem item) {
 }
 
 void OnlineWorker::submit_net_io(WorkItem item) {
+    item.enqueue_ns = perf().record_enqueue(QueueType::kNetIO, item.trace_id);
     auto* q = static_cast<BatchedSPSCWorkQueue*>(get_queue(idx_net_io_));
     if (q) {
         q->push_batch(&item, 1);
@@ -59,6 +61,7 @@ void OnlineWorker::submit_net_io(WorkItem item) {
 }
 
 void OnlineWorker::submit_disk_io(WorkItem item) {
+    item.enqueue_ns = perf().record_enqueue(QueueType::kDiskIO, item.trace_id);
     auto* q = static_cast<BatchedSPSCWorkQueue*>(get_queue(idx_disk_io_));
     if (q) {
         q->push_batch(&item, 1);

@@ -76,12 +76,19 @@ folly::coro::Task<void> Scheduler::run() {
 
         last_poll_times_[decision.queue_index] = now_ns();
         for (size_t i = 0; i < n; ++i) {
+            if (perf_ && batch[i].enqueue_ns > 0) {
+                perf_->record_dequeue(queue->type(), batch[i].enqueue_ns);
+            }
             auto t0 = now_ns();
             batch[i].execute();
             auto t1 = now_ns();
+            auto exec_ns = t1 - t0;
             stats_.total_tasks_executed++;
-            stats_.total_exec_ns += (t1 - t0);
-            policy_->on_task_completed(queue->type(), t1 - t0);
+            stats_.total_exec_ns += exec_ns;
+            if (perf_) {
+                perf_->record_exec(queue->type(), exec_ns);
+            }
+            policy_->on_task_completed(queue->type(), exec_ns);
         }
         total_dequeued_[decision.queue_index] += n;
     }

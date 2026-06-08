@@ -13,6 +13,7 @@ struct WorkItem {
     };
     uint8_t tag;          // 0 = func, 1 = coroutine
     uint32_t trace_id{0};
+    uint64_t enqueue_ns{0};  // 入队时间戳（PerfLevel::kTrace 时非零）
 
     WorkItem() noexcept : func(nullptr), tag(0) {}
 
@@ -43,6 +44,7 @@ struct WorkItem {
         func = nullptr;
         tag = 0;
         trace_id = 0;
+        enqueue_ns = 0;
     }
 };
 

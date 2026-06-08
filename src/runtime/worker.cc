@@ -116,7 +116,10 @@ Worker::Worker(Config cfg)
       policy_(make_policy(cfg_.policy_cfg)),
       scheduler_(policy_.get(), idle_.get()),
       mem_pool_(std::make_unique<adapt::QuantMemoryResource>()),
-      work_item_pool_(std::make_unique<adapt::ObjectPool<WorkItem>>()) {}
+      work_item_pool_(std::make_unique<adapt::ObjectPool<WorkItem>>()),
+      perf_(id_) {
+    scheduler_.set_perf(&perf_);
+}
 
 size_t Worker::add_queue(std::unique_ptr<WorkQueue> q) {
     return scheduler_.register_queue(std::move(q));
