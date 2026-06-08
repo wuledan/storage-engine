@@ -73,6 +73,10 @@ folly::coro::Task<void> Scheduler::run() {
         stats_.total_polls++;
 
         if (decision.idle) {
+            // 有 IO backend 时持续 polling，不进入 idle 阻塞
+            if (io_backend_) {
+                continue;  // 跳过休眠，继续 polling
+            }
             stats_.total_idles++;
             idle_->enter_idle();
             continue;
