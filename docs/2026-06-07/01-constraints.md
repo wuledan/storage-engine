@@ -61,7 +61,45 @@
 - 日志：结构化输出，包含 thread_id / coroutine_id / trace_id
 - 命名：snake_case 文件名，PascalCase 类型名，snake_case 函数/变量名
 
-## 6. 待明确
+## 6. 性能交付约束
+
+### 6.1 任务级性能预期
+
+每个开发任务必须明确性能预期指标。Review 时验证实际数据与预期的一致性。
+
+| 阶段 | 要求 |
+|------|------|
+| **任务设计** | 明确 P50/P99 延迟、吞吐量、内存开销的预期值 |
+| **代码提交** | 附带 benchmark 数据，与预期对比 |
+| **Review** | 实际值偏离预期 > 2x 视为不通过，需根因分析 |
+| **修复后** | 重跑 benchmark，确认修复有效 |
+
+### 6.2 基准数据（持续更新）
+
+| 指标 | 当前值 | 预期目标 | 来源 |
+|------|--------|---------|------|
+| 纯队列调度 P50 | 683 ns | < 1 μs | `BenchmarkDetail.SchedulingLatencyInternal` |
+| Active 跨线程 RTT P50 | 982 ns | < 2 μs | `BenchmarkDetail.CrossThreadActiveWorker` |
+| Idle PARK 唤醒 P50 | 16.4 μs | < 25 μs | `BenchmarkDetail.CrossThreadIdleWorker` |
+| io_uring Write P50 | 4.75 μs | < 10 μs | `BenchmarkIO.IoUringLatency` |
+| io_uring IOPS | 292 K/s | > 200 K/s | `BenchmarkIO.IoUringIOPs` |
+| Worker 启动 P50 | 63 μs | < 100 μs | `BenchmarkCoroutine.WorkerLifecycleLatency` |
+
+### 6.3 偏离处理
+
+```
+实测值 > 预期 × 2:
+  → Review 不通过
+  → 分析根因（flame graph / perf counter / 队列深度）
+  → 修复后重新 benchmark
+  → 更新预期值（如果预期设定不当）
+
+实测值 ≤ 预期:
+  → Review 通过
+  → 如显著优于预期(> 2x)，考虑收紧预期值
+```
+
+## 7. 待明确
 
 - [ ] 一致性模型（强一致 / 最终一致 / 会话一致）
 - [ ] 数据模型（KV / 列存 / 行存 / 混合）
