@@ -73,7 +73,7 @@ public:
     size_t idx_timer_{0};
 
 private:
-    TaskDispatchMode dispatch_mode_{TaskDispatchMode::kIndirect};
+    TaskDispatchMode dispatch_mode_{TaskDispatchMode::kDirect};
 };
 
 }  // namespace storage::runtime

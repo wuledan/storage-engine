@@ -37,7 +37,7 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
         QueueType::kNetIO, Priority::kHigh, "net_io"));
     idx_disk_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kDiskIO, Priority::kMedium, "disk_io"));
-    idx_engine_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
+    idx_engine_ = add_queue(std::make_unique<LocalWorkQueue>(
         QueueType::kEngine, Priority::kMedium, "engine", 200000));
     idx_timer_ = add_queue(std::make_unique<LocalWorkQueue>(
         QueueType::kTimer, Priority::kHigh, "timer"));

@@ -13,9 +13,9 @@ FeedbackLoop::FeedbackLoop(MetricsCollector& collector,
                            const Config& cfg)
     : collector_(collector), decider_(decider), executor_(executor), cfg_(cfg) {
     hw_ = HardwareTopology::probe();
-    // 初始计划：保守 DispatchSingle
-    current_plan_.strategy = DispatchStrategy::kDispatchSingle;
-    current_plan_.dispatch_threads = 1;
+    // 默认 RTC (DirectAll) 模式 — 非网络IO分离
+    current_plan_.strategy = DispatchStrategy::kDirectAll;
+    current_plan_.direct_workers = 4;
 }
 
 void FeedbackLoop::bind_workers(OnlineWorkerGroup* workers) {
