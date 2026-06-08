@@ -990,3 +990,178 @@ TEST(BenchmarkIO, Mode2_CrossThreadPingPong) {
         std::cout << "  P99: " << (latencies[N*99/100]/ghz/1000.0) << " us" << std::endl;
     }
 }
+
+// ============================================================================
+// NVMe Block Size × QD Matrix (O_DIRECT, physical NVMe device)
+// IOPS table + latency table for 512B ~ 1M blocks
+// ============================================================================
+
+// Helper: run QD-pipelined benchmark and collect latencies
+// buf must be a valid aligned buffer of size >= bs
+static void run_qd_bench(OnlineWorker& w, int fd, size_t bs, int qd,
+                          size_t ops, std::vector<uint64_t>& latencies,
+                          void* buf) {
+    std::atomic<size_t> submitted{0}, completed{0};
+    std::atomic<bool> stop{false};
+
+    std::thread submitter([&]() {
+        while (!stop.load() && submitted.load() < ops) {
+            if (submitted.load() - completed.load() < (size_t)qd) {
+                size_t slot = submitted.fetch_add(1);
+                if (slot >= ops) break;
+                uint64_t t0 = __builtin_ia32_rdtsc();
+                IORequest req;
+                req.op = IORequest::kWrite;
+                req.fd = fd;
+                req.offset = (slot % 1000) * bs;
+                req.buf = buf;
+                req.len = bs;
+                req.callback = [&, slot, t0](IOCompletion c) {
+                    if (c.result == (int64_t)bs)
+                        latencies[slot] = __builtin_ia32_rdtsc() - t0;
+                    completed.fetch_add(1);
+                };
+                w.io_backend()->submit(std::move(req));
+            } else {
+                _mm_pause();
+            }
+        }
+        stop.store(true);
+    });
+
+    while (completed.load() < ops)
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    stop.store(true);
+    submitter.join();
+}
+
+TEST(BenchmarkIO, NVMe_BlockSizeMatrix) {
+    const std::vector<size_t> sizes = {
+        512, 1024, 2048, 4096, 8192, 16384,
+        32768, 65536, 131072, 262144, 524288, 1048576
+    };
+    const std::vector<int> qds = {1, 4, 16, 64, 128};
+
+    for (const auto& type : {"io_uring", "libaio"}) {
+        Worker::Config cfg;
+        cfg.cpu_id = 1;
+        OnlineWorker w(cfg);
+        IOBackendConfig io_cfg;
+        io_cfg.type = type;
+        io_cfg.queue_depth = 256;
+        try { w.init_io_backend(io_cfg); }
+        catch (...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
+        w.start();
+
+        // ── IOPS Table ──
+        std::cout << "\n=== NVMe " << type << " Block Size × QD (O_DIRECT) ===" << std::endl;
+        std::cout << "  BS      |";
+        for (int qd : qds) std::cout << "  QD=" << qd << "   |";
+        std::cout << "\n  --------|";
+        for (size_t i = 0; i < qds.size(); ++i) std::cout << "----------|";
+        std::cout << std::endl;
+
+        for (size_t bs : sizes) {
+            std::string path = "/mnt/nvme_test/bench_bs_" + std::to_string(bs) + "_" + type;
+            int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+            if (fd < 0) { printf("  %-6s | skip\n", bs<1024?"512B":((bs/1024==1)?"1K":"")); continue; }
+            void* buf = nullptr;
+            posix_memalign(&buf, 4096, bs);
+            memset(buf, 'A', bs);
+
+            char label[16];
+            if (bs < 1024) snprintf(label, sizeof(label), "512B");
+            else if (bs < 1048576) snprintf(label, sizeof(label), "%zuK", bs/1024);
+            else snprintf(label, sizeof(label), "1M");
+            printf("  %-6s |", label);
+
+            for (int qd : qds) {
+                const size_t ops = (qd <= 4) ? 200 : 500;
+                std::vector<uint64_t> lat(ops, 0);
+                run_qd_bench(w, fd, bs, qd, ops, lat, buf);
+                std::vector<uint64_t> lat_filtered;
+                for (auto v : lat) if (v > 0) lat_filtered.push_back(v);
+                if (!lat_filtered.empty()) {
+                    std::sort(lat_filtered.begin(), lat_filtered.end());
+                    double ghz = 3.0;
+                    size_t n = lat_filtered.size();
+                    double avg_ns = std::accumulate(lat_filtered.begin(),lat_filtered.end(),0ULL)/(double)n/ghz;
+                    double iops = 1e9 / (avg_ns > 0 ? avg_ns : 1) * qd / 1000.0;
+                    printf("  %5.0fK  |", iops);
+                } else {
+                    printf("    -     |");
+                }
+            }
+            std::cout << std::endl;
+            free(buf);
+            close(fd);
+            unlink(path.c_str());
+        }
+
+        // ── Latency Table (QD=1 P50/P99 + QD=128 P50/BW) ──
+        std::cout << "\n  --- " << type << " Latency ---" << std::endl;
+        std::cout << "  BS      |  QD=1 P50  |  QD=1 P99  |  QD=128 P50 |  QD=128 BW" << std::endl;
+        std::cout << "  --------|------------|------------|------------|------------" << std::endl;
+
+        for (size_t bs : sizes) {
+            std::string path = "/mnt/nvme_test/bench_lat_" + std::to_string(bs) + "_" + type;
+            int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+            if (fd < 0) continue;
+            void* buf = nullptr;
+            posix_memalign(&buf, 4096, bs);
+            memset(buf, 'L', bs);
+
+            char label[16];
+            if (bs < 1024) snprintf(label, sizeof(label), "512B");
+            else if (bs < 1048576) snprintf(label, sizeof(label), "%zuK", bs/1024);
+            else snprintf(label, sizeof(label), "1M");
+
+            double p50_qd1 = 0, p99_qd1 = 0;
+            double p50_qd128 = 0, bw_qd128 = 0;
+
+            // QD=1
+            {
+                const size_t ops = 200;
+                std::vector<uint64_t> lat(ops, 0);
+                run_qd_bench(w, fd, bs, 1, ops, lat, buf);
+                std::vector<uint64_t> lat_f;
+                for (auto v : lat) if (v > 0) lat_f.push_back(v);
+                if (!lat_f.empty()) {
+                    std::sort(lat_f.begin(), lat_f.end());
+                    double ghz = 3.0;
+                    size_t n = lat_f.size();
+                    p50_qd1 = lat_f[n/2] / ghz / 1000.0;
+                    p99_qd1 = lat_f[n*99/100] / ghz / 1000.0;
+                }
+            }
+
+            // QD=128
+            {
+                const size_t ops = 500;
+                std::vector<uint64_t> lat(ops, 0);
+                run_qd_bench(w, fd, bs, 128, ops, lat, buf);
+                std::vector<uint64_t> lat_f;
+                for (auto v : lat) if (v > 0) lat_f.push_back(v);
+                if (!lat_f.empty()) {
+                    std::sort(lat_f.begin(), lat_f.end());
+                    double ghz = 3.0;
+                    size_t n = lat_f.size();
+                    p50_qd128 = lat_f[n/2] / ghz / 1000.0;
+                    double avg_ns = std::accumulate(lat_f.begin(),lat_f.end(),0ULL)/(double)n/ghz;
+                    double iops = 1e9 / (avg_ns > 0 ? avg_ns : 1) * 128;
+                    bw_qd128 = (iops * bs) / (1024.0 * 1024.0);
+                }
+            }
+
+            printf("  %-6s |  %7.2f  |  %7.2f  |  %7.2f  |  %7.0f\n",
+                   label, p50_qd1, p99_qd1, p50_qd128, bw_qd128);
+
+            free(buf);
+            close(fd);
+            unlink(path.c_str());
+        }
+
+        w.stop();
+        w.join();
+    }
+}
