@@ -67,3 +67,21 @@ endif()
 sanitizer_add(test_io_stress)
 include(GoogleTest)
 gtest_discover_tests(test_io_stress)
+
+# Idle degradation test
+add_executable(test_idle_degradation test_idle_degradation.cpp)
+target_link_libraries(test_idle_degradation
+    PRIVATE
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+target_include_directories(test_idle_degradation PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_idle_degradation PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_idle_degradation)
+include(GoogleTest)
+gtest_discover_tests(test_idle_degradation)
