@@ -3,6 +3,7 @@
 #include "batched_spsc_work_queue.h"
 #include "local_work_queue.h"
 #include "policy_factory.h"
+#include "io/io_engine.h"
 #include <mutex>
 
 namespace storage::runtime {
@@ -111,6 +112,29 @@ folly::coro::Task<void> OnlineWorker::co_submit_engine(std::function<void()> wor
     notify();  // 唤醒 worker，确保引擎队列任务被处理
 
     co_await *baton;
+}
+
+// ── IO Backend ──
+
+void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
+    io_backend_ = io::IOEngine::create(cfg, make_route_func());
+    scheduler().set_io_backend(io_backend_.get());
+}
+
+folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(
+    int fd, uint64_t offset, void* buf, size_t len) {
+    if (!io_backend_) {
+        throw std::runtime_error("IO backend not initialized");
+    }
+    co_return co_await io_backend_->co_read(fd, offset, buf, len);
+}
+
+folly::coro::Task<io::IOCompletion> OnlineWorker::co_write(
+    int fd, uint64_t offset, const void* buf, size_t len) {
+    if (!io_backend_) {
+        throw std::runtime_error("IO backend not initialized");
+    }
+    co_return co_await io_backend_->co_write(fd, offset, buf, len);
 }
 
 }  // namespace storage::runtime

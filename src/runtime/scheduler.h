@@ -4,6 +4,7 @@
 #include "adaptive_idle.h"
 #include "work_item.h"
 #include "worker_perf.h"
+#include "io/io_backend.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -25,6 +26,7 @@ public:
     void set_policy(SchedulingPolicy* policy) noexcept { policy_ = policy; }
     void set_idle(AdaptiveIdle* idle) noexcept { idle_ = idle; }
     void set_perf(WorkerPerf* perf) noexcept { perf_ = perf; }
+    void set_io_backend(storage::io::IIOBackend* backend) noexcept { io_backend_ = backend; }
     void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
 
     // 热替换指定索引的队列（仅允许在 worker 未运行时调用）
@@ -42,6 +44,7 @@ private:
     SchedulingPolicy* policy_;
     AdaptiveIdle* idle_;
     WorkerPerf* perf_{nullptr};
+    storage::io::IIOBackend* io_backend_{nullptr};
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     SchedulerStats stats_;

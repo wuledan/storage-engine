@@ -34,10 +34,10 @@ TEST(ExecutorTest, QueueHotSwap) {
     Worker::Config cfg;
     OnlineWorker w(cfg);
 
-    // 默认是 BatchedSPSC (kSPSC)
+    // 默认是 LocalWorkQueue (kLocal)
     auto* old_q = w.get_queue(w.idx_engine_);
     ASSERT_NE(old_q, nullptr);
-    EXPECT_EQ(old_q->semantic(), QueueSemantic::kSPSC);
+    EXPECT_EQ(old_q->semantic(), QueueSemantic::kLocal);
 
     // 切换到 LocalWorkQueue (kDirect)
     auto new_q = std::make_unique<LocalWorkQueue>(

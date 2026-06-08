@@ -64,3 +64,66 @@ add_runtime_test(test_decision_system     test_decision_system.cpp)
 add_runtime_test(test_executor            test_executor.cpp)
 
 add_runtime_test(test_feedback_loop       test_feedback_loop.cpp)
+
+# IO types test (links io library + runtime)
+add_executable(test_io_types test_io_types.cpp)
+target_link_libraries(test_io_types
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+target_include_directories(test_io_types PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_io_types PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_io_types)
+gtest_discover_tests(test_io_types)
+
+# IO uring test (links io library + runtime + uring)
+add_executable(test_io_uring test_io_uring.cpp)
+target_link_libraries(test_io_uring
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+if(LIBURING)
+    target_link_libraries(test_io_uring PRIVATE ${LIBURING})
+endif()
+target_include_directories(test_io_uring PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_io_uring PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_io_uring)
+gtest_discover_tests(test_io_uring)
+
+# IO backend test (libaio + SPDK skeleton)
+add_executable(test_io_backends test_io_backends.cpp)
+target_link_libraries(test_io_backends
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+if(LIBURING)
+    target_link_libraries(test_io_backends PRIVATE ${LIBURING})
+endif()
+if(LIBAIO)
+    target_link_libraries(test_io_backends PRIVATE ${LIBAIO})
+endif()
+target_include_directories(test_io_backends PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_io_backends PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_io_backends)
+gtest_discover_tests(test_io_backends)

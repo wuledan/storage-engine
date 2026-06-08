@@ -3,6 +3,8 @@
 #include "dispatch_types.h"
 #include "local_work_queue.h"
 #include "affine_work_queue.h"
+#include "io/io_backend.h"
+#include "io/io_engine.h"
 #include <functional>
 #include <folly/coro/Task.h>
 #include "adapt/affinity_baton.h"
@@ -65,12 +67,24 @@ public:
 
     TaskDispatchMode dispatch_mode() const { return dispatch_mode_; }
 
+    // ── IO Backend ──
+    void init_io_backend(const io::IOBackendConfig& cfg);
+    io::IIOBackend* io_backend() { return io_backend_.get(); }
+
+    // 协程友好的 IO API
+    folly::coro::Task<io::IOCompletion> co_read(
+        int fd, uint64_t offset, void* buf, size_t len);
+    folly::coro::Task<io::IOCompletion> co_write(
+        int fd, uint64_t offset, const void* buf, size_t len);
+
     // 队列索引（在构造函数中注册，公开供外部轮询器和测试使用）
     size_t idx_engine_{0};
     size_t idx_net_io_{0};
     size_t idx_disk_io_{0};
     size_t idx_affine_{0};
     size_t idx_timer_{0};
+
+    std::unique_ptr<io::IIOBackend> io_backend_;
 
 private:
     TaskDispatchMode dispatch_mode_{TaskDispatchMode::kDirect};

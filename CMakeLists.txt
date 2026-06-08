@@ -156,4 +156,5 @@ enable_testing()
 
 # Add subdirectories
 add_subdirectory(src)
+add_subdirectory(src/io)
 add_subdirectory(tests)
