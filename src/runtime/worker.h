@@ -6,6 +6,7 @@
 #include "worker_perf.h"
 #include "adapt/object_pool.h"
 #include "adapt/memory_pool.h"
+#include <folly/Executor.h>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -21,10 +22,10 @@ struct WorkerStats {
     uint64_t total_idles{0};
 };
 
-class Worker {
+class Worker : public folly::Executor {
 public:
     struct Config {
-        uint32_t cpu_id{1};    // 默认绑核 0, 0=不绑定
+        uint32_t cpu_id{1};
         uint32_t numa_node{0};
         PolicyConfig policy_cfg{"strict_priority", {}, 64};
         AdaptiveIdle::Config idle_cfg;
@@ -44,27 +45,35 @@ public:
     WorkerStats stats() const;
     size_t worker_id() const noexcept { return id_; }
 
-    // 公开队列访问，供外部轮询器和测试使用
     WorkQueue* get_queue(size_t idx) const { return scheduler_.get_queue(idx); }
 
-    // ── 性能计数 ──
     WorkerPerf& perf() { return perf_; }
     void set_perf_level(PerfLevel lv) { perf_.set_level(lv); }
+
+    // ── folly::Executor ──
+    // quant::WorkStealingExecutor 模式: Task final_suspend 调度回 worker
+    void add(folly::Func func) override;
+
+    // 由子类设置 affine 队列索引
+    void set_affine_q_idx(size_t idx) { affine_q_idx_ = idx; }
 
 protected:
     Scheduler& scheduler() { return scheduler_; }
     AdaptiveIdle& idle() { return *idle_; }
     const Config& config() const { return cfg_; }
 
-    // 子类覆写：在 start 的线程入口处自定义初始化
     virtual void on_worker_start() {}
 
-    // 向本 worker 的 affine queue 投递协程句柄（外部线程可调用）
     virtual void enqueue_affine(std::coroutine_handle<> h) {
-        (void)h;  // 默认空实现，子类可覆写
+        (void)h;
     }
 
-    // ── 内存池访问 ──
+    // 重载：接受函数指针回调（Executor 路径）
+    virtual void enqueue_affine(void(*fn)(void*), void* arg) {
+        fn(arg);
+        delete static_cast<folly::Func*>(arg);
+    }
+
     adapt::QuantMemoryResource& memory_resource() { return *mem_pool_; }
     adapt::ObjectPool<WorkItem>& work_item_pool() { return *work_item_pool_; }
 
@@ -79,8 +88,8 @@ private:
     std::unique_ptr<SchedulingPolicy> policy_;
     Scheduler scheduler_;
     std::thread thread_;
+    size_t affine_q_idx_{SIZE_MAX};
 
-    // 每 worker 独立的共享 nothing 内存池
     std::unique_ptr<adapt::QuantMemoryResource> mem_pool_;
     std::unique_ptr<adapt::ObjectPool<WorkItem>> work_item_pool_;
 

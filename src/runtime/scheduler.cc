@@ -37,12 +37,21 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
         if (n == 0) break;
         last_poll_times_[affine_idx_] = now_ns();
         for (size_t i = 0; i < n; ++i) {
-            auto t0 = now_ns();
-            batch[i].execute();
-            auto exec_ns = now_ns() - t0;
-            stats_.total_tasks_executed++;
-            stats_.total_exec_ns += exec_ns;
-            if (perf_) perf_->record_exec(q->type(), exec_ns);
+            if (batch[i].tag == 1) {
+                // 协程：两次 resume 跳过 initial_suspend
+                auto h = batch[i].coro;
+                h.resume();             // Step 1: 可能停在 initial_suspend
+                if (!h.done()) {
+                    h.resume();         // Step 2: 进入业务体或停在 co_await
+                }
+            } else {
+                auto t0 = now_ns();
+                batch[i].execute();
+                auto exec_ns = now_ns() - t0;
+                stats_.total_tasks_executed++;
+                stats_.total_exec_ns += exec_ns;
+                if (perf_) perf_->record_exec(q->type(), exec_ns);
+            }
         }
         total_dequeued_[affine_idx_] += n;
     }

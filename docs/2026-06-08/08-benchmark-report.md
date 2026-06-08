@@ -232,4 +232,4 @@ Idle 跨线程 16.4μs:
 1. LocalQueue/BatchedSPSC dequeue 受 `std::chrono` 微秒分辨率限制
 2. 单 NUMA 节点，跨 NUMA 未测
 3. 未启用 ASAN/TSAN/UBSAN
-4. Worker 未绑定 CPU
+4. fio 基线使用 O_DIRECT，我们的 Mode1 也使用 O_DIRECT + 绑核

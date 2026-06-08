@@ -172,6 +172,33 @@ void Worker::notify() {
     idle_->notify();
 }
 
+// ── folly::Executor ──
+// 遵循 quant::WorkStealingExecutor 模式
+// folly::coro::Task 完成时通过此方法调度回 worker 的 P0 队列
+namespace {
+struct ExecutorTask {
+    struct promise_type {
+        folly::Func func;
+        ExecutorTask get_return_object() {
+            return ExecutorTask{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() noexcept { std::terminate(); }
+    };
+    std::coroutine_handle<promise_type> handle;
+};
+}  // namespace
+
+void Worker::add(folly::Func func) {
+    auto task = [](folly::Func f) -> ExecutorTask {
+        f();
+        co_return;
+    }(std::move(func));
+    enqueue_affine(task.handle);
+}
+
 WorkerStats Worker::stats() const {
     WorkerStats s;
     const auto& sched_stats = scheduler_.stats();
