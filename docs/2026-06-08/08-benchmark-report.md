@@ -96,18 +96,18 @@ Idle 跨线程 16.4μs:
 
 > 100 次循环，不绑定 CPU
 
-## 5. IO 性能（O_DIRECT, 4K, 绑核）
+## 5. IO 性能（O_DIRECT, NVMe Solidigm P41 Plus, 绑核）
 
-### 5.1 Mode 1 — 同核协程（SimpleCoro，Worker 内执行）
+### fio 基线（裸 IO 参考）
 
-协程投递到 Worker 的 P0 affine 队列，Scheduler 驱动执行。co_await co_write → 挂起 → Scheduler poll IO → baton.post → 恢复。**零跨线程开销**。
+| 配置 | P50 | P99 | IOPS |
+|------|-----|-----|------|
+| libaio QD=1 | 20 μs | 46 μs | 20.6k |
+| io_uring QD=1 | 27 μs | 35 μs | 26.7k |
+| libaio QD=128 | 692 μs | 1.06 ms | 130k |
+| io_uring QD=128 | 545 μs | 922 μs | 155k |
 
-#### Ping-Pong (QD=1, 4K)
-
-| 后端 | P50 | P99 | Avg |
-|------|-----|-----|-----|
-| io_uring | **16.8 μs** | 97.7 μs | 25.4 μs |
-| libaio | **9.5 μs** | 18.6 μs | 10.0 μs |
+### 5.1 Mode 1 — 同核协程（SimpleCoro, O_DIRECT, NVMe, 4K）
 
 #### QD 扩展 (4K)
 

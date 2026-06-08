@@ -828,8 +828,8 @@ TEST(BenchmarkIO, Mode1_SameCorePingPong) {
         }
         w.start();
 
-        std::string path = "/tmp/bench_m1_" + std::string(type);
-        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        std::string path = "/mnt/nvme_test/bench_m1_" + std::string(type);
+        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
         if (fd < 0) { w.stop(); w.join(); continue; }
         void* buf = nullptr;
         posix_memalign(&buf, 4096, 4096);
@@ -885,8 +885,8 @@ TEST(BenchmarkIO, Mode1_SameCoreQDScaling) {
         try { w.init_io_backend(io_cfg); } catch (...) { continue; }
         w.start();
 
-        std::string path = "/tmp/bench_m1_qd_" + std::string(type);
-        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        std::string path = "/mnt/nvme_test/bench_m1_qd_" + std::string(type);
+        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
         if (fd < 0) { w.stop(); w.join(); continue; }
         void* buf = nullptr;
         posix_memalign(&buf, 4096, 4096);
@@ -951,8 +951,8 @@ TEST(BenchmarkIO, Mode2_CrossThreadPingPong) {
         try { w.init_io_backend(io_cfg); } catch (...) { continue; }
         w.start();
 
-        std::string path = "/tmp/bench_m2_" + std::string(type);
-        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        std::string path = "/mnt/nvme_test/bench_m2_" + std::string(type);
+        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
         if (fd < 0) { w.stop(); w.join(); continue; }
         void* buf = nullptr;
         posix_memalign(&buf, 4096, 4096);
