@@ -9,6 +9,8 @@
 #include <iostream>
 #include <iomanip>
 #include <mutex>
+#include <x86intrin.h>
+#include <emmintrin.h>
 #include <folly/coro/BlockingWait.h>
 #include "runtime/local_queue.h"
 #include "runtime/batched_spsc_queue.h"
@@ -549,6 +551,182 @@ TEST(BenchmarkCoroutine, WorkerLifecycleLatency) {
     std::cout << "  Start P99: " << start_latencies[kCycles*99/100] / 1000.0 << " us" << std::endl;
     std::cout << "  Stop  P50: " << stop_latencies[kCycles/2] / 1000.0 << " us" << std::endl;
     std::cout << "  Stop  P99: " << stop_latencies[kCycles*99/100] / 1000.0 << " us" << std::endl;
+}
+
+// ============================================================================
+// BenchmarkDetail: 细分延迟分析 (使用 rdtsc 获取高精度时间戳)
+// ============================================================================
+#include "runtime/worker_perf.h"
+
+// ── 全局桥接状态（单线程 benchmark，无竞争） ──
+static uint64_t* g_bench_result{nullptr};
+static std::atomic<bool> g_bench_done{false};
+
+static void bench_record_elapsed() {
+    if (g_bench_result) {
+        *g_bench_result = __builtin_ia32_rdtsc();
+    }
+    g_bench_done.store(true);
+}
+
+static void bench_set_true() {
+    g_bench_done.store(true);
+}
+
+// ===== 纯调度延迟（Worker 内部，无跨线程唤醒） =====
+TEST(BenchmarkDetail, SchedulingLatencyInternal) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+
+    constexpr size_t kSamples = 100000;
+    std::vector<uint64_t> latencies(kSamples);
+
+    w.start();
+
+    for (size_t i = 0; i < kSamples; ++i) {
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        g_bench_result = &latencies[i];
+        g_bench_done = false;
+
+        w.submit_engine(WorkItem::make_func(bench_record_elapsed));
+        w.notify();
+
+        while (!g_bench_done.load()) { _mm_pause(); }
+        latencies[i] = latencies[i] - t0;
+    }
+
+    w.stop();
+    w.join();
+
+    std::sort(latencies.begin(), latencies.end());
+    double ghz = 3.0;
+
+    std::cout << "\n=== Internal Scheduling Latency (submit_engine \xE2\x86\x92 execute, active worker) ===" << std::endl;
+    std::cout << "  P50:   " << (latencies[kSamples/2] / ghz) << " ns" << std::endl;
+    std::cout << "  P99:   " << (latencies[kSamples*99/100] / ghz) << " ns" << std::endl;
+    std::cout << "  P999:  " << (latencies[kSamples*999/1000] / ghz) << " ns" << std::endl;
+    std::cout << "  P9999: " << (latencies[kSamples*9999/10000] / ghz) << " ns" << std::endl;
+}
+
+// ===== 排队延迟（用 perf counter） =====
+TEST(BenchmarkDetail, QueueWaitLatency) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    w.set_perf_level(PerfLevel::kTrace);
+
+    constexpr size_t kSamples = 50000;
+
+    w.start();
+
+    for (size_t i = 0; i < kSamples; ++i) {
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        WorkItem item = WorkItem::make_func([]() {});
+        item.enqueue_ns = t0;  // 手动记录入队时间
+
+        w.submit_engine(std::move(item));
+        w.notify();
+    }
+
+    // 等待调度器处理完所有任务
+    g_bench_done = false;
+    w.submit_engine(WorkItem::make_func(bench_set_true));
+    w.notify();
+    while (!g_bench_done.load()) { _mm_pause(); }
+
+    w.stop();
+    w.join();
+
+    auto snap = w.perf().snapshot();
+    for (auto& q : snap.queues) {
+        if (q.type == QueueType::kEngine) {
+            std::cout << "\n=== Queue Wait Latency (perf counter) ===" << std::endl;
+            std::cout << "  enqueued: " << q.enqueued << std::endl;
+            std::cout << "  avg_wait: " << q.avg_wait_ns << " ns" << std::endl;
+            std::cout << "  max_wait: " << q.max_wait_ns << " ns" << std::endl;
+            std::cout << "  P50_wait: " << q.p50_wait_ns / 3.0 << " ns (rdtsc)" << std::endl;
+            std::cout << "  P99_wait: " << q.p99_wait_ns / 3.0 << " ns (rdtsc)" << std::endl;
+        }
+    }
+}
+
+// ===== 跨线程往返延迟 =====
+
+// 场景 A: Worker 已激活（非 idle）
+TEST(BenchmarkDetail, CrossThreadActiveWorker) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    w.start();
+
+    // 先投递一个任务让 worker 脱离 idle 状态
+    g_bench_done = false;
+    w.submit_engine(WorkItem::make_func(bench_set_true));
+    w.notify();
+    while (!g_bench_done.load()) { _mm_pause(); }
+
+    constexpr size_t kSamples = 10000;
+    std::vector<uint64_t> latencies(kSamples);
+
+    for (size_t i = 0; i < kSamples; ++i) {
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        g_bench_result = &latencies[i];
+        g_bench_done = false;
+
+        w.submit_engine(WorkItem::make_func(bench_record_elapsed));
+        w.notify();
+
+        while (!g_bench_done.load()) { _mm_pause(); }
+        latencies[i] = latencies[i] - t0;
+    }
+
+    w.stop();
+    w.join();
+
+    std::sort(latencies.begin(), latencies.end());
+    double ghz = 3.0;
+
+    std::cout << "\n=== Cross-Thread RTT (Worker ACTIVE) ===" << std::endl;
+    std::cout << "  P50:  " << (latencies[kSamples/2] / ghz) << " ns" << std::endl;
+    std::cout << "  P99:  " << (latencies[kSamples*99/100] / ghz) << " ns" << std::endl;
+    std::cout << "  P999: " << (latencies[kSamples*999/1000] / ghz) << " ns" << std::endl;
+}
+
+// 场景 B: Worker 空闲（PARK 状态），测量唤醒延迟
+TEST(BenchmarkDetail, CrossThreadIdleWorker) {
+    Worker::Config cfg;
+    OnlineWorker w(cfg);
+    w.start();
+
+    // 等待 worker 进入 idle (PARK)
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    constexpr size_t kSamples = 1000;
+    std::vector<uint64_t> latencies(kSamples);
+
+    for (size_t i = 0; i < kSamples; ++i) {
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        g_bench_result = &latencies[i];
+        g_bench_done = false;
+
+        w.submit_engine(WorkItem::make_func(bench_record_elapsed));
+        w.notify();
+
+        while (!g_bench_done.load()) { _mm_pause(); }
+        latencies[i] = latencies[i] - t0;
+
+        // 等待再次 idle
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    w.stop();
+    w.join();
+
+    std::sort(latencies.begin(), latencies.end());
+    double ghz = 3.0;
+
+    std::cout << "\n=== Cross-Thread RTT (Worker IDLE/PARKED) ===" << std::endl;
+    std::cout << "  P50:  " << (latencies[kSamples/2] / ghz) << " ns" << std::endl;
+    std::cout << "  P99:  " << (latencies[kSamples*99/100] / ghz) << " ns" << std::endl;
+    std::cout << "  P999: " << (latencies[kSamples*999/1000] / ghz) << " ns" << std::endl;
 }
 
 
