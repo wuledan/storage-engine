@@ -74,6 +74,7 @@ folly::coro::Task<void> Scheduler::run() {
     while (running_.load(std::memory_order_acquire)) {
         // ── Step 1: IO poll + 立即排空产生的 P0 ──
         if (io_backend_) {
+            io_backend_->flush_pending();  // 先尝试 flush buffer（决策 + 批量提交）
             io_backend_->flush_submissions();
             // 循环收割直到 CQ 为空，避免高 QD 时漏掉完成事件
             while (true) {
@@ -85,7 +86,6 @@ folly::coro::Task<void> Scheduler::run() {
                         io_comps[j].callback(io_comps[j]);
                     }
                 }
-            }
             }
             // IO 完成回调会 baton.post → enqueue_affine → P0
             // 立即排空 P0，不等下一轮

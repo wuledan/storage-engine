@@ -24,6 +24,11 @@ public:
 
     // 提交 IO 请求（非阻塞）
     virtual void submit(IORequest req) = 0;
+    virtual void submit_batch(std::vector<IORequest> requests) {
+        for (auto& req : requests) submit(std::move(req));
+    }
+    virtual void flush_pending() {}
+    virtual size_t pending_count() const noexcept { return 0; }
     virtual void flush_submissions() {}  // 默认空操作
 
     // 轮询 IO 完成事件（非阻塞，返回实际完成数）

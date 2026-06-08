@@ -151,3 +151,24 @@ if(FOLLY_BUILD_INCLUDE_DIR)
 endif()
 sanitizer_add(test_error_codes)
 gtest_discover_tests(test_error_codes)
+
+# Batch submit test
+add_executable(test_batch_submit test_batch_submit.cpp)
+target_link_libraries(test_batch_submit
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+if(LIBURING)
+    target_link_libraries(test_batch_submit PRIVATE ${LIBURING})
+endif()
+target_include_directories(test_batch_submit PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_batch_submit PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_batch_submit)
+gtest_discover_tests(test_batch_submit)
