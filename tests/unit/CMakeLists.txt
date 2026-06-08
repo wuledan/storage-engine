@@ -58,3 +58,9 @@ add_runtime_test(test_memory_pool        test_memory_pool.cpp)
 add_runtime_test(test_perf               test_perf.cpp)
 add_runtime_test(test_perf_comprehensive  test_perf_comprehensive.cpp)
 add_runtime_test(test_trace_config       test_trace_config.cpp)
+
+add_runtime_test(test_decision_system     test_decision_system.cpp)
+
+add_runtime_test(test_executor            test_executor.cpp)
+
+add_runtime_test(test_feedback_loop       test_feedback_loop.cpp)

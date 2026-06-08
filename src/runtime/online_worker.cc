@@ -46,9 +46,21 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
 
 void OnlineWorker::submit_engine(WorkItem item) {
     item.enqueue_ns = perf().record_enqueue(QueueType::kEngine, item.trace_id);
-    auto* q = static_cast<BatchedSPSCWorkQueue*>(get_queue(idx_engine_));
-    if (q) {
-        q->push_batch(&item, 1);
+    auto* q = get_queue(idx_engine_);
+    if (!q) return;
+
+    if (dispatch_mode_ == TaskDispatchMode::kDirect) {
+        if (auto* lq = dynamic_cast<LocalWorkQueue*>(q)) {
+            lq->try_enqueue(std::move(item));
+        }
+    } else {
+        // Indirect: default path via BatchedSPSCWorkQueue / AffineWorkQueue
+        if (auto* bq = dynamic_cast<BatchedSPSCWorkQueue*>(q)) {
+            bq->push_batch(&item, 1);
+        } else if (auto* aq = dynamic_cast<AffineWorkQueue*>(q)) {
+            aq->enqueue(std::move(item));
+            notify();
+        }
     }
 }
 

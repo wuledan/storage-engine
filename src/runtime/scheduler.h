@@ -27,6 +27,13 @@ public:
     void set_perf(WorkerPerf* perf) noexcept { perf_ = perf; }
     void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
 
+    // 热替换指定索引的队列（仅允许在 worker 未运行时调用）
+    bool replace_queue(size_t idx, std::unique_ptr<WorkQueue> new_queue) {
+        if (idx >= queues_.size()) return false;
+        queues_[idx] = std::move(new_queue);
+        return true;
+    }
+
     const SchedulerStats& stats() const noexcept { return stats_; }
     void reset_stats() noexcept { stats_ = SchedulerStats{}; }
 

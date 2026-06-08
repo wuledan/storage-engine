@@ -1,10 +1,19 @@
 #pragma once
 #include "worker.h"
+#include "dispatch_types.h"
+#include "local_work_queue.h"
+#include "affine_work_queue.h"
 #include <functional>
 #include <folly/coro/Task.h>
 #include "adapt/affinity_baton.h"
 
 namespace storage::runtime {
+
+// 任务分发模式
+enum class TaskDispatchMode : uint8_t {
+    kIndirect,  // 通过 MPMC/Affine 队列间接分发（默认）
+    kDirect,    // 直接写入 Local 队列
+};
 
 class OnlineWorker : public Worker {
 public:
@@ -24,12 +33,47 @@ public:
     // 创建 RouteFunc，捕获 this 用于 enqueue_affine 路由
     adapt::RouteFunc make_route_func();
 
+    // 热替换 engine 队列（用于 dispatch 策略切换）
+    // 排空旧队列任务，迁移到新队列，更新 dispatch_mode_
+    bool swap_engine_queue(std::unique_ptr<WorkQueue> new_queue) {
+        auto* old_q = get_queue(idx_engine_);
+        if (!old_q) return false;
+
+        // 排空旧队列
+        WorkItem item;
+        while (old_q->try_dequeue(item)) {
+            if (auto* lq = dynamic_cast<LocalWorkQueue*>(new_queue.get())) {
+                lq->try_enqueue(std::move(item));
+            } else if (auto* aq = dynamic_cast<AffineWorkQueue*>(new_queue.get())) {
+                aq->enqueue(std::move(item));
+            }
+        }
+
+        // 替换
+        bool ok = scheduler().replace_queue(idx_engine_, std::move(new_queue));
+        if (ok) {
+            // 根据新队列语义自动设置 dispatch 模式
+            auto* q = get_queue(idx_engine_);
+            if (q && q->semantic() == QueueSemantic::kLocal) {
+                dispatch_mode_ = TaskDispatchMode::kDirect;
+            } else {
+                dispatch_mode_ = TaskDispatchMode::kIndirect;
+            }
+        }
+        return ok;
+    }
+
+    TaskDispatchMode dispatch_mode() const { return dispatch_mode_; }
+
     // 队列索引（在构造函数中注册，公开供外部轮询器和测试使用）
     size_t idx_engine_{0};
     size_t idx_net_io_{0};
     size_t idx_disk_io_{0};
     size_t idx_affine_{0};
     size_t idx_timer_{0};
+
+private:
+    TaskDispatchMode dispatch_mode_{TaskDispatchMode::kIndirect};
 };
 
 }  // namespace storage::runtime
