@@ -65,13 +65,8 @@ void IOUringBackend::submit(IORequest req) {
         break;
     }
     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(idx));
-
-    // 自适应提交：低 QD 立即 submit，高 QD 批量
     pending_sqe_count_++;
-    if (pending_sqe_count_ <= kImmediateSubmitThreshold) {
-        io_uring_submit(&ring_);
-        pending_sqe_count_ = 0;
-    }
+    // 不在此处 submit —— Scheduler::flush_submissions 统一批量提交
 }
 
 void IOUringBackend::flush_submissions() {

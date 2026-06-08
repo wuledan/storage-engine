@@ -24,7 +24,6 @@ private:
     std::vector<IORequest> pending_;
     size_t submit_count_{0};
     size_t pending_sqe_count_{0};
-    static constexpr size_t kImmediateSubmitThreshold = 4;
 };
 
 }  // namespace storage::io
