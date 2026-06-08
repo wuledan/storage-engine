@@ -21,8 +21,10 @@ public:
 private:
     size_t queue_depth_;
     struct io_uring ring_;
-    std::vector<IORequest> pending_;  // 按 user_data 索引
-    size_t submit_count_{0};          // 计数器用于 user_data
+    std::vector<IORequest> pending_;
+    size_t submit_count_{0};
+    size_t pending_sqe_count_{0};
+    static constexpr size_t kImmediateSubmitThreshold = 4;
 };
 
 }  // namespace storage::io

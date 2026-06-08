@@ -30,8 +30,8 @@ IOUringBackend::~IOUringBackend() {
 void IOUringBackend::submit(IORequest req) {
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe) {
-        // SQ 满 → 先提交一次腾空间，稍后 Scheduler::poll 会统一 flush
         io_uring_submit(&ring_);
+        pending_sqe_count_ = 0;
         sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
             if (req.callback) {
@@ -65,11 +65,20 @@ void IOUringBackend::submit(IORequest req) {
         break;
     }
     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(idx));
-    // 不在此处 submit —— Scheduler::poll 统一批量提交
+
+    // 自适应提交：低 QD 立即 submit，高 QD 批量
+    pending_sqe_count_++;
+    if (pending_sqe_count_ <= kImmediateSubmitThreshold) {
+        io_uring_submit(&ring_);
+        pending_sqe_count_ = 0;
+    }
 }
 
 void IOUringBackend::flush_submissions() {
-    io_uring_submit(&ring_);
+    if (pending_sqe_count_ > 0) {
+        io_uring_submit(&ring_);
+        pending_sqe_count_ = 0;
+    }
 }
 
 size_t IOUringBackend::poll(IOCompletion* out, size_t max) {
