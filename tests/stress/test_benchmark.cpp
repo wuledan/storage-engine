@@ -238,3 +238,50 @@ TEST(BenchmarkIO, IterRate) {
     printf("Scheduler: %lu iters/sec → %.0f ns/iter\n", iters, 1e9/(double)iters);
     w.stop(); w.join();
 }
+
+// 精确测量单 IO 各阶段
+TEST(BenchmarkIO, SingleIOTimeline) {
+    Worker::Config c; c.cpu_id = 1;
+    OnlineWorker w(c);
+    IOBackendConfig io; io.type = "io_uring"; io.queue_depth = 256;
+    try { w.init_io_backend(io); } catch(...) { return; }
+    w.start();
+    std::string p = "/mnt/nvme_test/tl"; int fd = open(p.c_str(), O_RDWR|O_CREAT|O_TRUNC|O_DIRECT, 0644);
+    void* b; posix_memalign(&b, 4096, 4096); memset(b, 'X', 4096);
+    void* f; posix_memalign(&f, 4096, 4096); memset(f,0,4096); pwrite(fd, f, 4096, 0); free(f);
+    
+    const int N = 200;
+    std::vector<uint64_t> lats(N);
+    std::atomic<size_t> next{0}, complete{0};
+    
+    struct Ctx { OnlineWorker* w; int fd; void* b; std::vector<uint64_t>* l; std::atomic<size_t>* n; std::atomic<size_t>* c; };
+    Ctx ctx{&w, fd, b, &lats, &next, &complete};
+    
+    auto t_start = std::chrono::steady_clock::now();
+    
+    // submit_engine → producer → N IOs
+    // 用 rdtsc 测量 submit→flush→co_await→resume 的完整链路
+    
+    // 简化为: 直接循环测 P50
+    for (int i = 0; i < N; ++i) {
+        std::atomic<bool> done{false};
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        IORequest rq{IORequest::kWrite, fd, (uint64_t)i*4096, b, 4096, 0,
+            [&done](IOCompletion) { done.store(true); }};
+        w.io_backend()->submit(std::move(rq));
+        w.io_backend()->flush_submissions();
+        while (!done.load()) _mm_pause();
+        lats[i] = __builtin_ia32_rdtsc() - t0;
+    }
+    
+    auto t_end = std::chrono::steady_clock::now();
+    double wall_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+    std::sort(lats.begin(), lats.end());
+    double ghz = 3.0;
+    printf("io_uring DIRECT (no Scheduler, no baton):\n");
+    printf("  P50=%.1fus P99=%.1fus avg=%.1fus\n", lats[N/2]/ghz/1000.0, lats[N*99/100]/ghz/1000.0,
+           std::accumulate(lats.begin(),lats.end(),0ULL)/N/ghz/1000.0);
+    printf("  RIOP(wall)=%.1fK LIOP(lat)=%.1fK\n", N/(wall_us/1e6)/1000.0, 1e9/(std::accumulate(lats.begin(),lats.end(),0ULL)/N/ghz)*1/1000.0);
+    
+    w.stop(); w.join(); close(fd); unlink(p.c_str()); free(b);
+}
