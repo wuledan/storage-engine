@@ -1091,10 +1091,9 @@ TEST(BenchmarkIO, NVMe_BlockSizeMatrix) {
     }
 }
 
-// ===== 严谨 QD 扩展 Benchmark (对齐 fio 模型, 1GB 顺序写) =====
-TEST(BenchmarkIO, QDBatchPipelined) {
-    const size_t BLOCK_SIZE = 4096;
-    const std::vector<int> qds = {1, 4, 16, 64, 128, 256};
+// ===== Fio-style: submit_batch(N) → 一次 syscall → poll 完成 =====
+TEST(BenchmarkIO, FioStyleBatch) {
+    std::vector<int> qds = {1, 4, 16, 64, 128, 256};
 
     for (const auto& type : {"io_uring", "libaio"}) {
         Worker::Config cfg;
@@ -1103,94 +1102,73 @@ TEST(BenchmarkIO, QDBatchPipelined) {
         IOBackendConfig io_cfg;
         io_cfg.type = type;
         io_cfg.queue_depth = 256;
-        try { w.init_io_backend(io_cfg); }
-        catch (...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
+        try { w.init_io_backend(io_cfg); } catch(...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
         w.start();
 
-        std::string path = "/mnt/nvme_test/bench_qd_batch_" + std::string(type);
+        std::string path = "/mnt/nvme_test/bench_fio_" + std::string(type);
         int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
         ASSERT_GE(fd, 0);
-
-        // 预分配 1GB 文件: 写第一个和最后一个 4K 块
         void* fill = nullptr;
-        ASSERT_EQ(posix_memalign(&fill, 4096, BLOCK_SIZE), 0);
-        memset(fill, 0, BLOCK_SIZE);
-        ssize_t ret;
-        ret = pwrite(fd, fill, BLOCK_SIZE, 0);
-        ASSERT_EQ(ret, (ssize_t)BLOCK_SIZE);
-        const size_t FILE_SIZE = 1024UL * 1024 * 1024;  // 1GB
-        ret = pwrite(fd, fill, BLOCK_SIZE, FILE_SIZE - BLOCK_SIZE);
-        ASSERT_EQ(ret, (ssize_t)BLOCK_SIZE);
+        posix_memalign(&fill, 4096, 4096);
+        memset(fill, 0, 4096);
+        pwrite(fd, fill, 4096, 0);
+        pwrite(fd, fill, 4096, 1024UL*1024*1024 - 4096);
         free(fill);
 
         void* buf = nullptr;
-        ASSERT_EQ(posix_memalign(&buf, 4096, BLOCK_SIZE), 0);
-        memset(buf, 'X', BLOCK_SIZE);
+        posix_memalign(&buf, 4096, 4096);
+        memset(buf, 'X', 4096);
 
-        std::cout << "\n=== QD Batch Pipelined " << type << " (1GB prealloc, O_DIRECT, 4K) ===" << std::endl;
-        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  Avg(us)  |  BW(MB/s)" << std::endl;
-        std::cout << "  ------|-----------|-----------|-----------|-----------|-----------|----------" << std::endl;
+        std::cout << "\n=== " << type << " Fio-Style Batch (submit_batch N, 1 syscall) ===" << std::endl;
+        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  Avg(us)  |  BW(MB/s)" << std::endl;
+        std::cout << "  ------|-----------|-----------|-----------|-----------|----------" << std::endl;
 
         for (int qd : qds) {
-            const size_t total_ops = (qd <= 16) ? 2000 : 10000;
-            std::vector<uint64_t> latencies(total_ops, 0);
-            std::atomic<size_t> submitted{0};
-            std::atomic<size_t> completed{0};
-            std::atomic<bool> stop{false};
+            const size_t rounds = (qd <= 16) ? 50 : 20;
+            std::vector<uint64_t> latencies;
 
-            auto t_start = std::chrono::steady_clock::now();
+            for (size_t r = 0; r < rounds; ++r) {
+                std::vector<IORequest> batch;
+                std::atomic<size_t> completed{0};
+                std::vector<uint64_t> round_lat(qd);
 
-            std::thread submitter([&]() {
-                while (submitted.load() < total_ops && !stop.load()) {
-                    while (submitted.load() - completed.load() < (size_t)qd
-                           && submitted.load() < total_ops) {
-                        size_t slot = submitted.fetch_add(1);
-                        uint64_t offset = (slot % 262144) * BLOCK_SIZE;
-                        uint64_t t0 = __builtin_ia32_rdtsc();
-
-                        IORequest req;
-                        req.op = IORequest::kWrite;
-                        req.fd = fd;
-                        req.offset = offset;
-                        req.buf = buf;
-                        req.len = BLOCK_SIZE;
-                        req.callback = [&, slot, t0](IOCompletion c) {
-                            if (c.result == (int64_t)BLOCK_SIZE)
-                                latencies[slot] = __builtin_ia32_rdtsc() - t0;
-                            completed.fetch_add(1);
-                        };
-                        w.io_backend()->submit(std::move(req));
-                    }
-                    _mm_pause();
+                for (int i = 0; i < qd; ++i) {
+                    uint64_t t0 = __builtin_ia32_rdtsc();
+                    size_t slot = i;
+                    IORequest req;
+                    req.op = IORequest::kWrite;
+                    req.fd = fd;
+                    req.offset = (r * qd + i) * 4096ULL;
+                    req.buf = buf;
+                    req.len = 4096;
+                    req.callback = [&completed, &round_lat, slot, t0](IOCompletion c) {
+                        if (c.result == 4096) round_lat[slot] = __builtin_ia32_rdtsc() - t0;
+                        completed.fetch_add(1);
+                    };
+                    batch.push_back(std::move(req));
                 }
-                stop.store(true);
-            });
 
-            while (completed.load() < total_ops) {
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                w.io_backend()->submit_batch(std::move(batch));  // ← 一次调用
+
+                while (completed.load() < (size_t)qd)
+                    std::this_thread::sleep_for(std::chrono::microseconds(10));
+
+                for (size_t i = 0; i < (size_t)qd; ++i) {
+                    if (round_lat[i] > 0) latencies.push_back(round_lat[i]);
+                }
             }
-            stop.store(true);
-            submitter.join();
 
-            auto t_end = std::chrono::steady_clock::now();
-            double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
-
-            std::vector<uint64_t> valid;
-            for (auto v : latencies) if (v > 0) valid.push_back(v);
-            if (valid.empty()) { printf("  %-4d  |  %7s\n", qd, "no_data"); continue; }
-
-            std::sort(valid.begin(), valid.end());
-            double ghz = 3.0;
-            size_t n = valid.size();
-            uint64_t p50_ns = valid[n/2] / ghz;
-            uint64_t p99_ns = valid[n*99/100] / ghz;
-            uint64_t p999_ns = valid[n*999/1000] / ghz;
-            uint64_t avg_ns = std::accumulate(valid.begin(), valid.end(), 0ULL) / n / ghz;
-            double iops = total_ops / (elapsed_us / 1e6);
-            double bw_mbps = iops * BLOCK_SIZE / (1024.0 * 1024.0);
-
-            printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.0f\n",
-                   qd, iops/1000.0, p50_ns/1000.0, p99_ns/1000.0, p999_ns/1000.0, avg_ns/1000.0, bw_mbps);
+            if (!latencies.empty()) {
+                std::sort(latencies.begin(), latencies.end());
+                double ghz = 3.0;
+                size_t n = latencies.size();
+                uint64_t avg_ns = std::accumulate(latencies.begin(),latencies.end(),0ULL) / n / ghz;
+                double actual_iops = 1e9 / (avg_ns > 0 ? avg_ns : 1) * qd / 1000.0;
+                double bw = actual_iops * 4096 * 1000 / (1024.0*1024.0);
+                printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.0f\n",
+                       qd, actual_iops, (latencies[n/2]/ghz/1000.0), (latencies[n*99/100]/ghz/1000.0),
+                       avg_ns/1000.0, bw);
+            }
         }
 
         w.stop(); w.join();

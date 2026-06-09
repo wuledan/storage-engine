@@ -12,9 +12,8 @@ namespace storage::io {
 class IOUringBackend : public IIOBackend {
 public:
     struct BufferConfig {
-        size_t max_batch_size{128};       // 达到此数立即 flush
-        uint64_t max_age_iterations{3};   // 最大等待轮数
-        double aging_weight{0.5};         // effective_priority -= age * weight
+        size_t min_batch_depth{0};         // 0=直通, >0=缓冲门槛
+        uint64_t max_age_iterations{3};    // 最大等待轮数
     };
 
     explicit IOUringBackend(size_t queue_depth = 256, IIOBackend::RouteFn route = {});
@@ -38,7 +37,6 @@ private:
     struct BufferEntry {
         IORequest request;
         uint64_t age{0};
-        runtime::Priority priority{runtime::Priority::kMedium};
     };
 
     size_t queue_depth_;

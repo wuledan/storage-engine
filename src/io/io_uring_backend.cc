@@ -33,10 +33,17 @@ void IOUringBackend::submit(IORequest req) {
 }
 
 void IOUringBackend::submit_batch(std::vector<IORequest> requests) {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    for (auto& req : requests) {
-        incoming_.push_back({std::move(req), 0, storage::runtime::Priority::kMedium});
+    // 满足最小深度或未配置 → 直接提交
+    if (requests.size() >= buf_cfg_.min_batch_depth) {
+        for (auto& req : requests) submit_impl(std::move(req));
+        flush_submissions();
+        return;
     }
+
+    // 不足最小深度 → 缓冲
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    for (auto& req : requests)
+        incoming_.push_back({std::move(req), 0});
 }
 
 // 实际填充 SQE（原来的 submit 逻辑）
@@ -82,56 +89,32 @@ void IOUringBackend::submit_impl(IORequest req) {
 }
 
 void IOUringBackend::flush_pending() {
-    // 双缓冲交换：短暂持锁将 incoming 交换到 flushing，释放锁后处理
+    if (buf_cfg_.min_batch_depth == 0) return;
+
+    std::vector<BufferEntry> to_flush;
     {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        if (incoming_.empty()) {
-            last_buffer_size_ = 0;
-            return;
-        }
-        flushing_.swap(incoming_);
+        if (incoming_.empty()) return;
+        to_flush.swap(incoming_);
     }
 
-    // 老化
-    for (auto& entry : flushing_) {
-        entry.age++;
-    }
+    for (auto& e : to_flush) e.age++;
 
-    // 决策
-    bool should_flush = false;
-
-    if (flushing_.size() == 1 && flushing_.size() <= last_buffer_size_) {
-        should_flush = true;
-    } else if (flushing_.size() >= buf_cfg_.max_batch_size) {
-        should_flush = true;
-    } else {
-        for (auto& entry : flushing_) {
-            double effective = static_cast<double>(static_cast<uint8_t>(entry.priority))
-                             - buf_cfg_.aging_weight * entry.age;
-            if (effective <= 0 || entry.age >= buf_cfg_.max_age_iterations) {
-                should_flush = true;
-                break;
-            }
+    bool go = (to_flush.size() >= buf_cfg_.min_batch_depth);
+    if (!go) {
+        for (auto& e : to_flush) {
+            if (e.age >= buf_cfg_.max_age_iterations) { go = true; break; }
         }
     }
 
-    if (!should_flush) {
-        // 不提交：flushing 中的请求回到 incoming（持锁）
+    if (!go) {
         std::lock_guard<std::mutex> lock(buffer_mutex_);
-        incoming_.insert(incoming_.end(),
-                         std::make_move_iterator(flushing_.begin()),
-                         std::make_move_iterator(flushing_.end()));
-        flushing_.clear();
-        last_buffer_size_ = incoming_.size();
+        incoming_.insert(incoming_.end(), std::make_move_iterator(to_flush.begin()),
+                         std::make_move_iterator(to_flush.end()));
         return;
     }
 
-    // Flush
-    for (auto& entry : flushing_) {
-        submit_impl(std::move(entry.request));
-    }
-    last_buffer_size_ = flushing_.size();
-    flushing_.clear();
+    for (auto& e : to_flush) submit_impl(std::move(e.request));
     flush_submissions();
 }
 
