@@ -32,6 +32,11 @@ struct BenchCtx {
     std::atomic<size_t>* next_batch;
     std::vector<uint64_t>* lats;
     std::atomic<bool>* done;
+    // Stage timing accumulators (rdtsc, QD=1 only)
+    uint64_t t_submit{0};
+    uint64_t t_flush{0};
+    uint64_t t_iowait{0};
+    size_t t_count{0};
 };
 static BenchCtx g_ctx;
 
@@ -52,10 +57,8 @@ struct ProducerCoro {
 static void bench_producer() {
     auto& ctx = g_ctx;
 
-    // 单协程：在 Worker 上原位创建，suspend_never 使其立即开始执行
     auto producer = [&ctx]() -> ProducerCoro {
         while (true) {
-            // 一批 QD 个 IO
             AffinityBaton baton;
             std::atomic<size_t> pending{0};
             std::vector<uint64_t> t0s(ctx.qd);
@@ -70,35 +73,32 @@ static void bench_producer() {
                 t0s[q] = __builtin_ia32_rdtsc();
 
                 IORequest req{
-                    IORequest::kWrite,
-                    ctx.fd,
-                    op * 4096ULL,
-                    ctx.buf,
-                    4096,
-                    0,
+                    IORequest::kWrite, ctx.fd, op * 4096ULL, ctx.buf, 4096, 0,
                     [&baton, &pending, &ctx, &t0s, q, op](IOCompletion) {
                         uint64_t delta = __builtin_ia32_rdtsc() - t0s[q];
-                        if (op < ctx.lats->size()) {
-                            (*ctx.lats)[op] = delta;
-                        }
-                        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                            // last one — wake up producer
-                            // 每次创建新 route（OnlineWorker 生命周期覆盖全测试）
+                        if (op < ctx.lats->size()) (*ctx.lats)[op] = delta;
+                        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1)
                             baton.post(ctx.w->make_route_func());
-                        }
                     }};
+                uint64_t t_sub0 = __builtin_ia32_rdtsc();
                 ctx.w->io_backend()->submit(std::move(req));
+                uint64_t t_sub1 = __builtin_ia32_rdtsc();
+                ctx.t_submit += t_sub1 - t_sub0;
             }
 
-            if (pending.load(std::memory_order_acquire) == 0) break;  // no more ops
+            if (pending.load(std::memory_order_acquire) == 0) break;
 
-            ctx.w->io_backend()->flush_submissions();  // ← 生产者自己 flush
+            uint64_t t_fl0 = __builtin_ia32_rdtsc();
+            ctx.w->io_backend()->flush_submissions();
+            uint64_t t_fl1 = __builtin_ia32_rdtsc();
+            ctx.t_flush += t_fl1 - t_fl0;
+            ctx.t_count++;
+
             co_await baton;
         }
         ctx.done->store(true);
     }();
 
-    // 协程已通过 suspend_never 启动，handle 不再需要
     (void)producer;
 }
 
@@ -151,6 +151,15 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                    (lats[n * 99 / 100] / ghz / 1000.0),
                    N * 4096.0 / us * 1e6 / 1024.0 / 1024.0,
                    (lats[n * 999 / 1000] / ghz / 1000.0));
+        }
+        // 输出 QD=1 的阶段计时
+        if (true) {
+            double ghz = 3.0;
+            printf("\n  Stage breakdown (rdtsc): submit=%lu/flush=%lu/io=%lu cycles  count=%zu\n",
+                   g_ctx.t_submit / (g_ctx.t_count ? g_ctx.t_count : 1),
+                   g_ctx.t_flush / (g_ctx.t_count ? g_ctx.t_count : 1),
+                   g_ctx.t_iowait,
+                   g_ctx.t_count);
         }
         w.stop(); w.join(); close(fd); unlink(path.c_str()); free(buf);
     }

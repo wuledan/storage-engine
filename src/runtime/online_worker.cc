@@ -68,38 +68,7 @@ adapt::RouteFunc OnlineWorker::make_route_func() {
 
 void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     io_backend_ = io::IOEngine::create(cfg, make_route_func());
-
-    // IO poll 协程：只收割 CQE，不调 flush_submissions
-    // flush_submissions 由生产者协程自行调用
-    struct IOCoro {
-        struct promise_type {
-            IOCoro get_return_object() { return IOCoro{std::coroutine_handle<promise_type>::from_promise(*this)}; }
-            std::suspend_never initial_suspend() noexcept { return {}; }
-            std::suspend_never final_suspend() noexcept { return {}; }
-            void return_void() noexcept {}
-            void unhandled_exception() noexcept { std::terminate(); }
-        };
-        std::coroutine_handle<promise_type> handle;
-    };
-    struct Reschedule {
-        OnlineWorker* w;
-        bool await_ready() noexcept { return false; }
-        void await_suspend(std::coroutine_handle<> h) noexcept { w->submit_disk_io(WorkItem::make_coro(h)); }
-        void await_resume() noexcept {}
-    };
-
-    auto io_coro = [](storage::io::IIOBackend* io, OnlineWorker* w) -> IOCoro {
-        storage::io::IOCompletion comps[64];
-        while (true) {
-            // 仅收割 CQE，不 flush_submissions（生产者自行 flush）
-            size_t n;
-            while ((n = io->poll(comps, 64)) > 0)
-                for (size_t i = 0; i < n; ++i)
-                    if (comps[i].callback) comps[i].callback(comps[i]);
-            co_await Reschedule{w};
-        }
-    }(io_backend_.get(), this);
-    submit_disk_io(WorkItem::make_coro(io_coro.handle));
+    scheduler().set_io_backend(io_backend_.get());
 }
 
 folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(
