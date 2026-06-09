@@ -1,0 +1,7 @@
+add_test([=[IOUringTest.CreateBackend]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_io_uring [==[--gtest_filter=IOUringTest.CreateBackend]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOUringTest.CreateBackend]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[IOUringTest.ReadWriteFile]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_io_uring [==[--gtest_filter=IOUringTest.ReadWriteFile]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOUringTest.ReadWriteFile]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[IOUringTest.ManyIOOps]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_io_uring [==[--gtest_filter=IOUringTest.ManyIOOps]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOUringTest.ManyIOOps]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_io_uring_TESTS IOUringTest.CreateBackend IOUringTest.ReadWriteFile IOUringTest.ManyIOOps)

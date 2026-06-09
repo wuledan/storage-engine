@@ -17,6 +17,9 @@ public:
 
 private:
     size_t max_batch_;
+    // 同一优先级内 round-robin: 上次选择的队列索引
+    size_t last_prio_{SIZE_MAX};
+    size_t last_idx_{0};
 };
 
 }  // namespace storage::runtime

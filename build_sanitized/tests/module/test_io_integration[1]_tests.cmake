@@ -1,0 +1,7 @@
+add_test([=[IOIntegrationTest.WorkerWithIOBackend]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_io_integration [==[--gtest_filter=IOIntegrationTest.WorkerWithIOBackend]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOIntegrationTest.WorkerWithIOBackend]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[IOIntegrationTest.SchedulerPollsIO]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_io_integration [==[--gtest_filter=IOIntegrationTest.SchedulerPollsIO]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOIntegrationTest.SchedulerPollsIO]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[IOIntegrationTest.MultipleConcurrentIO]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_io_integration [==[--gtest_filter=IOIntegrationTest.MultipleConcurrentIO]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOIntegrationTest.MultipleConcurrentIO]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_io_integration_TESTS IOIntegrationTest.WorkerWithIOBackend IOIntegrationTest.SchedulerPollsIO IOIntegrationTest.MultipleConcurrentIO)

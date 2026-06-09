@@ -84,7 +84,7 @@ void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     struct Reschedule {
         OnlineWorker* w;
         bool await_ready() noexcept { return false; }
-        void await_suspend(std::coroutine_handle<> h) noexcept { w->enqueue_affine(h); }
+        void await_suspend(std::coroutine_handle<> h) noexcept { w->submit_disk_io(WorkItem::make_coro(h)); }
         void await_resume() noexcept {}
     };
 
@@ -99,7 +99,7 @@ void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
             co_await Reschedule{w};
         }
     }(io_backend_.get(), this);
-    enqueue_affine(io_coro.handle);
+    submit_disk_io(WorkItem::make_coro(io_coro.handle));
 }
 
 folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(

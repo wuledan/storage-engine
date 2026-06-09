@@ -1,0 +1,7 @@
+add_test([=[IOStressTest.SustainedHighIOPS_60s]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/stress/test_io_stress [==[--gtest_filter=IOStressTest.SustainedHighIOPS_60s]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOStressTest.SustainedHighIOPS_60s]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/stress SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[IOStressTest.BurstSubmission]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/stress/test_io_stress [==[--gtest_filter=IOStressTest.BurstSubmission]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOStressTest.BurstSubmission]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/stress SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[IOStressTest.IoUringCorrectness]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/stress/test_io_stress [==[--gtest_filter=IOStressTest.IoUringCorrectness]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[IOStressTest.IoUringCorrectness]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/stress SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_io_stress_TESTS IOStressTest.SustainedHighIOPS_60s IOStressTest.BurstSubmission IOStressTest.IoUringCorrectness)

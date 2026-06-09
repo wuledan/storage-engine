@@ -1,0 +1,5 @@
+if(EXISTS "/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_io_types[1]_tests.cmake")
+  include("/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_io_types[1]_tests.cmake")
+else()
+  add_test(test_io_types_NOT_BUILT test_io_types_NOT_BUILT)
+endif()

@@ -1,0 +1,7 @@
+add_test([=[MockIOTest.PollerDeliversCompletions]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_mock_io_poller [==[--gtest_filter=MockIOTest.PollerDeliversCompletions]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[MockIOTest.PollerDeliversCompletions]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[MockIOTest.WorkerConsumesIOCompletions]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_mock_io_poller [==[--gtest_filter=MockIOTest.WorkerConsumesIOCompletions]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[MockIOTest.WorkerConsumesIOCompletions]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[MockIOTest.AffinePriorityOverNetIO]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_mock_io_poller [==[--gtest_filter=MockIOTest.AffinePriorityOverNetIO]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[MockIOTest.AffinePriorityOverNetIO]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/module SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_mock_io_poller_TESTS MockIOTest.PollerDeliversCompletions MockIOTest.WorkerConsumesIOCompletions MockIOTest.AffinePriorityOverNetIO)

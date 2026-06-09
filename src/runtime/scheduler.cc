@@ -37,9 +37,7 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
         last_poll_times_[affine_idx_] = now_ns();
         for (size_t i = 0; i < n; ++i) {
             if (batch[i].tag == 1) {
-                auto h = batch[i].coro;
-                h.resume();
-                if (!h.done()) h.resume();
+                batch[i].execute();
             } else {
                 auto t0 = now_ns();
                 batch[i].execute();

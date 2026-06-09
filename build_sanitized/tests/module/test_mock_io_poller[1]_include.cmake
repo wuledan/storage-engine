@@ -1,0 +1,5 @@
+if(EXISTS "/home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_mock_io_poller[1]_tests.cmake")
+  include("/home/wuledan/work/proj/storage-engine/build_sanitized/tests/module/test_mock_io_poller[1]_tests.cmake")
+else()
+  add_test(test_mock_io_poller_NOT_BUILT test_mock_io_poller_NOT_BUILT)
+endif()

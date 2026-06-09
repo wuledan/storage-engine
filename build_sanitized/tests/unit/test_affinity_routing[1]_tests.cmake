@@ -1,0 +1,7 @@
+add_test([=[AffinityRoutingTest.AffineQueueHasHighestPriority]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_affinity_routing [==[--gtest_filter=AffinityRoutingTest.AffineQueueHasHighestPriority]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[AffinityRoutingTest.AffineQueueHasHighestPriority]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[AffinityRoutingTest.RouteFuncBridge]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_affinity_routing [==[--gtest_filter=AffinityRoutingTest.RouteFuncBridge]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[AffinityRoutingTest.RouteFuncBridge]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[AffinityRoutingTest.MultiWorkerIsolation]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_affinity_routing [==[--gtest_filter=AffinityRoutingTest.MultiWorkerIsolation]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[AffinityRoutingTest.MultiWorkerIsolation]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_affinity_routing_TESTS AffinityRoutingTest.AffineQueueHasHighestPriority AffinityRoutingTest.RouteFuncBridge AffinityRoutingTest.MultiWorkerIsolation)

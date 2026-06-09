@@ -1,0 +1,7 @@
+add_test([=[CoroutineTest.SchedulerRunAsCoroutine]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_coroutine [==[--gtest_filter=CoroutineTest.SchedulerRunAsCoroutine]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CoroutineTest.SchedulerRunAsCoroutine]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[CoroutineTest.BlockingWaitAndStop]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_coroutine [==[--gtest_filter=CoroutineTest.BlockingWaitAndStop]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CoroutineTest.BlockingWaitAndStop]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[CoroutineTest.TasksExecuteInCoroutine]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_coroutine [==[--gtest_filter=CoroutineTest.TasksExecuteInCoroutine]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CoroutineTest.TasksExecuteInCoroutine]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_coroutine_TESTS CoroutineTest.SchedulerRunAsCoroutine CoroutineTest.BlockingWaitAndStop CoroutineTest.TasksExecuteInCoroutine)
