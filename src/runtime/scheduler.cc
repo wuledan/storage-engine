@@ -28,7 +28,6 @@ WorkQueue* Scheduler::get_queue(size_t idx) const {
     return nullptr;
 }
 
-// 排空 P0 (affine) 队列，直到为空
 void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
     if (affine_idx_ >= queues_.size()) return;
     auto& q = queues_[affine_idx_];
@@ -39,7 +38,7 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
         for (size_t i = 0; i < n; ++i) {
             if (batch[i].tag == 1) {
                 auto h = batch[i].coro;
-                h.resume();  // suspend_never → 直接进业务体
+                h.resume();
             } else {
                 auto t0 = now_ns();
                 batch[i].execute();
@@ -62,39 +61,17 @@ folly::coro::Task<void> Scheduler::run() {
     }
 
     constexpr size_t kMaxBatchSize = 64;
-
     std::vector<QueueSnapshot> snapshots;
     snapshots.reserve(queues_.size());
     std::vector<WorkItem> batch(kMaxBatchSize);
 
     while (running_.load(std::memory_order_acquire)) {
-        // ── Step 1: IO poll + 立即排空产生的 P0 ──
-        if (io_backend_) {
-            io_backend_->flush_pending();  // 先尝试 flush buffer（决策 + 批量提交）
-            io_backend_->flush_submissions();
-            // 循环收割直到 CQ 为空，避免高 QD 时漏掉完成事件
-            while (true) {
-                storage::io::IOCompletion io_comps[64];
-                size_t io_n = io_backend_->poll(io_comps, 64);
-                if (io_n == 0) break;
-                for (size_t j = 0; j < io_n; ++j) {
-                    if (io_comps[j].callback) {
-                        io_comps[j].callback(io_comps[j]);
-                    }
-                }
-            }
-            // IO 完成回调会 baton.post → enqueue_affine → P0
-            // 立即排空 P0，不等下一轮
-            drain_p0(batch, kMaxBatchSize);
-        }
-
-        // ── Step 2: 再次排空 P0（任务执行可能产生新 P0） ──
+        // ── Step 1: 排空 P0 (IO 完成回调 + 协程恢复等) ──
         drain_p0(batch, kMaxBatchSize);
 
-        // ── Step 3: 快照 + 策略决策 ──
+        // ── Step 2: 快照 + 策略决策 ──
         snapshots.clear();
         for (size_t i = 0; i < queues_.size(); ++i) {
-            // P0 已经排空，跳过让策略关注低优先级
             QueueSnapshot snap;
             snap.type = queues_[i]->type();
             snap.priority = queues_[i]->base_priority();
@@ -107,11 +84,8 @@ folly::coro::Task<void> Scheduler::run() {
         auto decision = policy_->decide(snapshots, stats_);
         stats_.total_polls++;
 
-        // ── Step 4: 全空 → 继续或 idle ──
+        // ── Step 3: 全空 → idle ──
         if (decision.idle) {
-            if (io_backend_) {
-                continue;
-            }
             stats_.total_idles++;
             idle_->enter_idle();
             continue;
@@ -141,7 +115,7 @@ folly::coro::Task<void> Scheduler::run() {
         }
         total_dequeued_[decision.queue_index] += n;
 
-        // ── Step 5: 执行任务可能产生新 P0 → 立即排空 ──
+        // Step 4: 任务执行可能产生新 P0 → 排空
         drain_p0(batch, kMaxBatchSize);
     }
 

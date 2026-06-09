@@ -799,16 +799,18 @@ struct IOWriteAwaitable {
 // baton.post 时通过 route → enqueue_affine → Scheduler → resume
 
 // ============================================================================
-// 协程流水线 — fio 对齐：保持 QD 个 IO 在飞行中，完全绕过 Scheduler
+// 协程流水线 — Worker 线程直接提交 + Scheduler poll
+// 使用 IO backend 直接 submit/poll，通过 Worker 创建的文件描述符
 // ============================================================================
 
 TEST(BenchmarkIO, CoroutinePipeline) {
     std::vector<int> qds = {1, 4, 16, 64, 128};
 
     for (const auto& type : {"io_uring", "libaio"}) {
+        // 直接创建 backend（不通过 Worker，防止并发 poll 冲突）
         std::unique_ptr<IIOBackend> backend;
         try { backend = IOEngine::create({"io_uring", 256}, nullptr); }
-        catch(...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
+        catch(...) { continue; }
 
         std::string path = "/mnt/nvme_test/bench_coro_" + std::string(type);
         int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
@@ -817,7 +819,7 @@ TEST(BenchmarkIO, CoroutinePipeline) {
         pwrite(fd, fill, 4096, 0); pwrite(fd, fill, 4096, 1024UL*1024*1024-4096); free(fill);
         void* buf; posix_memalign(&buf, 4096, 4096); memset(buf, 'X', 4096);
 
-        std::cout << "\n=== " << type << " Coroutine Pipeline (fio-aligned, standalone) ===" << std::endl;
+        std::cout << "\n=== " << type << " Direct Pipeline (standalone IO backend) ===" << std::endl;
         std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  BW(MB/s)" << std::endl;
         std::cout << "  ------|-----------|-----------|-----------|----------" << std::endl;
 
@@ -828,6 +830,7 @@ TEST(BenchmarkIO, CoroutinePipeline) {
 
             auto t_start = std::chrono::steady_clock::now();
             std::thread io_thread([&]() {
+                // 初始填充 QD
                 for (size_t i = 0; i < (size_t)qd && i < total_ops; ++i) {
                     size_t s = submitted.fetch_add(1);
                     uint64_t t0 = __builtin_ia32_rdtsc();
@@ -848,6 +851,7 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                     for (size_t i = 0; i < n; ++i)
                         if (comps[i].callback) comps[i].callback(comps[i]);
 
+                    // 保持 QD 流水线
                     while (submitted.load() - completed.load() < (size_t)qd && submitted.load() < total_ops) {
                         size_t s = submitted.fetch_add(1);
                         uint64_t t0 = __builtin_ia32_rdtsc();
@@ -868,7 +872,6 @@ TEST(BenchmarkIO, CoroutinePipeline) {
 
             auto t1 = std::chrono::steady_clock::now();
             double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t_start).count();
-
             std::sort(latencies.begin(), latencies.end());
             double ghz = 3.0;
             size_t valid_n = 0;
@@ -877,8 +880,7 @@ TEST(BenchmarkIO, CoroutinePipeline) {
             double iops = completed.load() / (elapsed_us / 1e6);
             double bw = iops * 4096 / (1024.0 * 1024.0);
             printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %6.0f\n",
-                   qd, iops/1000.0,
-                   (latencies[valid_n/2]/ghz/1000.0),
+                   qd, iops/1000.0, (latencies[valid_n/2]/ghz/1000.0),
                    (latencies[valid_n*99/100]/ghz/1000.0), bw);
         }
         close(fd); unlink(path.c_str()); free(buf);
