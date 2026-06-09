@@ -38,10 +38,8 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
         for (size_t i = 0; i < n; ++i) {
             if (batch[i].tag == 1) {
                 auto h = batch[i].coro;
-                h.resume();       // Step 1: 过 initial_suspend
-                if (!h.done()) {
-                    h.resume();   // Step 2: 进入业务体，可能在 co_await 处挂起
-                }
+                h.resume();
+                if (!h.done()) h.resume();
             } else {
                 auto t0 = now_ns();
                 batch[i].execute();

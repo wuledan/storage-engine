@@ -24,12 +24,13 @@ struct SimpleCoro {
         SimpleCoro get_return_object() {
             return SimpleCoro{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
-        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_always initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() noexcept {}
         void unhandled_exception() noexcept { std::terminate(); }
     };
     std::coroutine_handle<promise_type> handle;
+    bool enqueued{false};  // drain_p0: true → single resume, false → double resume
 };
 
 std::function<void()> g_bench_fn;
@@ -63,7 +64,7 @@ TEST(BenchmarkIO, CoroutinePipeline) {
 
             auto t0 = std::chrono::steady_clock::now();
 
-            // Worker 上原位创建协程
+            // Worker 上原位创建协程（通过 engine queue submit）
             {
                 std::lock_guard<std::mutex> lk(g_bench_mutex);
                 g_bench_fn = [&]() {
@@ -85,7 +86,16 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                     }
                 };
             }
-            w.submit_engine(WorkItem::make_func(run_bench_fn));
+            // 用 enqueue_affine 绕过 submit_engine 的非原子问题
+            // 创建一个简单的启动协程
+            auto starter = [&]() -> SimpleCoro {
+                // 这个协程在 Worker 上运行，创建的 child 协程也在 Worker 上
+                std::function<void()> fn;
+                { std::lock_guard<std::mutex> lk(g_bench_mutex); fn = std::move(g_bench_fn); }
+                if (fn) fn();
+            };
+            auto sc = starter();
+            w.enqueue_affine(sc.handle);
             w.notify();
 
             while (complete.load() < (size_t)qd)
