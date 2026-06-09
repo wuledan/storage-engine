@@ -2,7 +2,6 @@
 #include "policy_factory.h"
 #include "adapt/affinity_baton.h"
 #include <hwloc.h>
-#include <folly/coro/BlockingWait.h>
 
 namespace storage::runtime {
 
@@ -213,7 +212,7 @@ void Worker::worker_loop() {
     tls_worker_id = id_;
     adapt::detail::get_current_worker_id = []() -> size_t { return tls_worker_id; };
     on_worker_start();
-    folly::coro::blockingWait(scheduler_.run());
+    scheduler_.run();
     tls_worker_id = SIZE_MAX;
     adapt::detail::get_current_worker_id = []() -> size_t { return SIZE_MAX; };
 }

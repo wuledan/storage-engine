@@ -9,7 +9,7 @@
 #include <memory>
 #include <vector>
 #include <cstdint>
-#include <folly/coro/Task.h>
+#include <atomic>
 
 namespace storage::runtime {
 
@@ -20,7 +20,7 @@ public:
     size_t register_queue(std::unique_ptr<WorkQueue> queue);
     WorkQueue* get_queue(size_t idx) const;
 
-    folly::coro::Task<void> run();
+    void run();
     void request_stop();
 
     void set_policy(SchedulingPolicy* policy) noexcept { policy_ = policy; }

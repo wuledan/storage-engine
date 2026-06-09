@@ -1,7 +1,6 @@
 #include "scheduler.h"
 #include <chrono>
 #include <algorithm>
-#include <folly/coro/Task.h>
 
 namespace storage::runtime {
 
@@ -51,12 +50,12 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
     }
 }
 
-folly::coro::Task<void> Scheduler::run() {
+void Scheduler::run() {
     running_.store(true, std::memory_order_release);
     if (stop_requested_.load(std::memory_order_acquire)) {
         running_.store(false, std::memory_order_release);
         if (idle_) idle_->notify();
-        co_return;
+        return;
     }
 
     constexpr size_t kMaxBatchSize = 64;
@@ -132,8 +131,6 @@ folly::coro::Task<void> Scheduler::run() {
         // Step 4: 任务执行可能产生新 P0 → 排空
         drain_p0(batch, kMaxBatchSize);
     }
-
-    co_return;
 }
 
 void Scheduler::request_stop() {
