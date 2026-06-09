@@ -23,7 +23,7 @@ namespace {
 
 struct SimpleCoro {
     struct promise_type {
-        std::atomic<bool>* done{nullptr};
+        std::atomic<size_t>* done{nullptr};
         SimpleCoro get_return_object() {
             return SimpleCoro{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
@@ -63,42 +63,42 @@ TEST(BenchmarkIO, CoroutinePipeline) {
             const size_t total_ops = (qd <= 16) ? 2000 : 10000;
             std::vector<uint64_t> latencies(total_ops);
             std::atomic<size_t> next_op{0};
-            std::atomic<bool> done{false};
-
+            std::atomic<size_t> done{0};
             auto t_start = std::chrono::steady_clock::now();
 
-            // 主协程在 Worker 上创建 QD 个子协程
-            auto master = [&]() -> SimpleCoro {
-                for (int q = 0; q < qd; ++q) {
-                    [&]() -> SimpleCoro {
-                        auto route = w.make_route_func();
-                        while (true) {
-                            size_t op = next_op.fetch_add(1);
-                            if (op >= total_ops) break;
+            // QD 个子协程，每个在 Worker 上持续投递 IO
+            std::vector<SimpleCoro> children;
+            for (int q = 0; q < qd; ++q) {
+                auto child = [&]() -> SimpleCoro {
+                    auto route = w.make_route_func();
+                    while (true) {
+                        size_t op = next_op.fetch_add(1);
+                        if (op >= total_ops) break;
 
-                            AffinityBaton baton;
-                            uint64_t t0 = __builtin_ia32_rdtsc();
+                        AffinityBaton baton;
+                        uint64_t t0 = __builtin_ia32_rdtsc();
 
-                            IORequest req;
-                            req.op = IORequest::kWrite; req.fd = fd;
-                            req.offset = op * 4096ULL; req.buf = buf; req.len = 4096;
-                            req.callback = [&baton, &route](IOCompletion) { baton.post(route); };
-                            w.io_backend()->submit(std::move(req));
-                            co_await baton;
+                        IORequest req;
+                        req.op = IORequest::kWrite; req.fd = fd;
+                        req.offset = op * 4096ULL; req.buf = buf; req.len = 4096;
+                        req.callback = [&baton, &route](IOCompletion) { baton.post(route); };
+                        w.io_backend()->submit(std::move(req));
+                        co_await baton;
 
-                            latencies[op] = __builtin_ia32_rdtsc() - t0;
-                        }
-                    }();
-                }
-                done.store(true);
-            };
-
-            auto coro = master();
-            coro.handle.promise().done = &done;
-            w.enqueue_affine(coro.handle);
+                        latencies[op] = __builtin_ia32_rdtsc() - t0;
+                    }
+                    done.fetch_add(1);
+                    co_return;
+                }();
+                children.push_back(std::move(child));
+            }
+            for (auto& c : children) {
+                c.handle.promise().done = &done;
+                w.enqueue_affine(c.handle);
+            }
             w.notify();
-
-            while (!done.load()) std::this_thread::sleep_for(std::chrono::microseconds(50));
+            while (done.load() < (size_t)qd)
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
 
             auto t_end = std::chrono::steady_clock::now();
             double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
