@@ -155,3 +155,24 @@ TEST(BenchmarkIO, CoroutinePipeline) {
         w.stop(); w.join(); close(fd); unlink(path.c_str()); free(buf);
     }
 }
+
+// 测量 Scheduler 决策开销
+TEST(BenchmarkIO, SchedulerOverhead) {
+    Worker::Config cfg; cfg.cpu_id = 1;
+    OnlineWorker w(cfg);
+    IOBackendConfig io_cfg; io_cfg.type = "io_uring"; io_cfg.queue_depth = 256;
+    try { w.init_io_backend(io_cfg); } catch(...) { return; }
+    w.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    auto stats = w.stats();
+    uint64_t polls = stats.total_polls;
+    uint64_t tasks = stats.tasks_executed;
+    
+    std::cout << "\n=== Scheduler Overhead ===" << std::endl;
+    std::cout << "  total_polls: " << polls << std::endl;
+    std::cout << "  tasks_exec:  " << tasks << std::endl;
+    
+    w.stop(); w.join();
+}
