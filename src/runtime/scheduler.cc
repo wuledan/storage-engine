@@ -85,6 +85,10 @@ folly::coro::Task<void> Scheduler::run() {
 
         // ── Step 3: 全空 → idle ──
         if (decision.idle) {
+            // IO backend 活跃时持续 polling，不进入 idle 休眠
+            if (io_backend_) {
+                continue;
+            }
             stats_.total_idles++;
             idle_->enter_idle();
             continue;
