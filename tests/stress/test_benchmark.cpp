@@ -40,6 +40,13 @@ struct BenchCtx {
     uint64_t t_flush{0};
     uint64_t t_iowait{0};
     size_t t_count{0};
+    // 精确开销探针
+    uint64_t t_producer{0};
+    uint64_t t_resume_gap{0};
+    uint64_t t_last_resume{0};
+    std::atomic<uint64_t> baton_rt{0};
+    // co_await 耗时 (挂起→恢复, 含IO等待)
+    uint64_t t_coro_suspend{0};
 };
 static BenchCtx g_ctx;
 
@@ -62,6 +69,12 @@ static void bench_producer() {
 
     auto producer = [&ctx]() -> ProducerCoro {
         while (true) {
+            // 测量 resume → loop 间隙
+            uint64_t t_now = __builtin_ia32_rdtsc();
+            if (ctx.t_last_resume > 0)
+                ctx.t_resume_gap += t_now - ctx.t_last_resume;
+            uint64_t t_loop = t_now;
+
             AffinityBaton baton;
             std::atomic<size_t> pending{0};
             std::vector<uint64_t> t0s(ctx.qd);
@@ -85,8 +98,10 @@ static void bench_producer() {
                     [&baton, &pending, &ctx, &t0s, q, op](IOCompletion) {
                         uint64_t delta = __builtin_ia32_rdtsc() - t0s[q];
                         if (op < ctx.lats->size()) (*ctx.lats)[op] = delta;
-                        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                            ctx.baton_rt.store(__builtin_ia32_rdtsc(), std::memory_order_relaxed);
                             baton.post(ctx.w->make_route_func());
+                        }
                     }};
                 uint64_t t_sub0 = __builtin_ia32_rdtsc();
                 ctx.w->io_backend()->submit(std::move(req));
@@ -102,7 +117,16 @@ static void bench_producer() {
             ctx.t_flush += t_fl1 - t_fl0;
             ctx.t_count++;
 
+            uint64_t t_coro0 = __builtin_ia32_rdtsc();
             co_await baton;
+            uint64_t t_resume = __builtin_ia32_rdtsc();
+            ctx.t_coro_suspend += t_resume - t_coro0;
+            ctx.t_producer += t_resume - t_loop;
+
+            uint64_t t_pre = ctx.baton_rt.exchange(0, std::memory_order_relaxed);
+            if (t_pre > 0) {
+                ctx.t_resume_gap += t_resume - t_pre;
+            }
         }
         ctx.wall_t1_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -114,7 +138,7 @@ static void bench_producer() {
 
 // ===== CoroutinePipeline: 单协程 batch 模式 =====
 TEST(BenchmarkIO, CoroutinePipeline) {
-    std::vector<int> qds = {1, 4, 16, 64, 128};
+    std::vector<int> qds = {1};
     for (const auto& type : {"io_uring", "libaio"}) {
         Worker::Config cfg; cfg.cpu_id = 1;
         OnlineWorker w(cfg);
@@ -183,10 +207,12 @@ TEST(BenchmarkIO, CoroutinePipeline) {
         }
         // 输出 QD=1 的阶段计时
         if (true) {
-            printf("\n  Stage breakdown (rdtsc): submit=%lu/flush=%lu/io=%lu cycles  count=%zu\n",
-                   g_ctx.t_submit / (g_ctx.t_count ? g_ctx.t_count : 1),
-                   g_ctx.t_flush / (g_ctx.t_count ? g_ctx.t_count : 1),
-                   g_ctx.t_iowait,
+            printf("\n  Probe (ns): submit=%.0f flush=%.0f co_await=%.0f baton_rt=%.0f producer=%.0f (N=%zu)\n",
+                   g_ctx.t_submit/(double)g_ctx.t_count/3.0,
+                   g_ctx.t_flush/(double)g_ctx.t_count/3.0,
+                   g_ctx.t_coro_suspend/(double)g_ctx.t_count/3.0,
+                   g_ctx.t_resume_gap/(double)g_ctx.t_count/3.0,
+                   g_ctx.t_producer/(double)g_ctx.t_count/3.0,
                    g_ctx.t_count);
         }
         // Scheduler 探针
@@ -283,5 +309,43 @@ TEST(BenchmarkIO, SingleIOTimeline) {
            std::accumulate(lats.begin(),lats.end(),0ULL)/N/ghz/1000.0);
     printf("  RIOP(wall)=%.1fK LIOP(lat)=%.1fK\n", N/(wall_us/1e6)/1000.0, 1e9/(std::accumulate(lats.begin(),lats.end(),0ULL)/N/ghz)*1/1000.0);
     
+    w.stop(); w.join(); close(fd); unlink(p.c_str()); free(b);
+}
+
+static std::atomic<uint64_t> g_cb_to_resume{0};
+static std::atomic<uint64_t> g_cb_count{0};
+
+TEST(BenchmarkIO, BatonRoundTrip) {
+    Worker::Config c; c.cpu_id = 1;
+    OnlineWorker w(c);
+    IOBackendConfig io; io.type = "io_uring"; io.queue_depth = 256;
+    try { w.init_io_backend(io); } catch(...) { return; }
+    w.start();
+    std::string p = "/mnt/nvme_test/br"; int fd = open(p.c_str(), O_RDWR|O_CREAT|O_TRUNC|O_DIRECT, 0644);
+    void* b; posix_memalign(&b, 4096, 4096); memset(b, 'X', 4096);
+    void* f; posix_memalign(&f, 4096, 4096); memset(f,0,4096); pwrite(fd, f, 4096, 0); free(f);
+    
+    const int N = 1000;
+    g_cb_to_resume.store(0); g_cb_count.store(0);
+    
+    for (int i = 0; i < N; ++i) {
+        auto child = [&]() -> struct { struct P { auto get() { return std::coroutine_handle<P>::from_promise(*this); } std::suspend_never i(){return{};} std::suspend_never f()noexcept{return{};} void r(){} void u()noexcept{std::terminate();} }; } {
+            auto route = w.make_route_func();
+            AffinityBaton baton;
+            IORequest rq{IORequest::kWrite, fd, (uint64_t)i*4096, b, 4096, 0,
+                [&baton, &route](IOCompletion c) { baton.post(route); }};
+            w.io_backend()->submit(std::move(rq));
+            w.io_backend()->flush_submissions();
+            uint64_t t0 = __builtin_ia32_rdtsc();
+            co_await baton;
+            uint64_t t1 = __builtin_ia32_rdtsc();
+            g_cb_to_resume.fetch_add(t1 - t0);
+            g_cb_count.fetch_add(1);
+        }();
+        w.enqueue_affine(child);
+    }
+    while (g_cb_count.load() < N) std::this_thread::sleep_for(std::chrono::microseconds(50));
+    double ghz = 3.0;
+    printf("io_uring baton round-trip (co_await→resume): avg=%.1fus\n", g_cb_to_resume.load()/(double)g_cb_count.load()/ghz/1000.0);
     w.stop(); w.join(); close(fd); unlink(p.c_str()); free(b);
 }
