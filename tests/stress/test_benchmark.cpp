@@ -13,17 +13,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <x86intrin.h>
-#include <random>
 
 using namespace storage::runtime;
 using namespace storage::io;
 using namespace storage::runtime::adapt;
 
 namespace {
-
 struct SimpleCoro {
     struct promise_type {
-        std::atomic<size_t>* done{nullptr};
         SimpleCoro get_return_object() {
             return SimpleCoro{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
@@ -35,79 +32,72 @@ struct SimpleCoro {
     std::coroutine_handle<promise_type> handle;
 };
 
+std::function<void()> g_bench_fn;
+std::mutex g_bench_mutex;
+void run_bench_fn() { std::function<void()> f; { std::lock_guard lk(g_bench_mutex); f = std::move(g_bench_fn); } if (f) f(); }
 }  // namespace
 
-// ===== 协程流水线 — Worker Scheduler 上 QD 协程 + 栈 AffinityBaton =====
+// ===== 协程流水线 — Worker 上原位创建 SimpleCoro，全程在 Scheduler 驱动下 =====
 TEST(BenchmarkIO, CoroutinePipeline) {
-    std::vector<int> qds = {1, 4, 16, 64, 128};
-
     for (const auto& type : {"io_uring", "libaio"}) {
         Worker::Config cfg; cfg.cpu_id = 1;
         OnlineWorker w(cfg);
         IOBackendConfig io_cfg; io_cfg.type = type; io_cfg.queue_depth = 256;
-        try { w.init_io_backend(io_cfg); } catch(...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
+        try { w.init_io_backend(io_cfg); } catch(...) { std::cout << "[Bench] " << type << " NOT AVAIL\n"; continue; }
         w.start();
 
-        std::string path = "/mnt/nvme_test/bench_coro_" + std::string(type);
+        std::string path = "/mnt/nvme_test/bench_c_" + std::string(type);
         int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
         if (fd < 0) { w.stop(); w.join(); continue; }
-        void* fill; posix_memalign(&fill, 4096, 4096); memset(fill, 0, 4096);
-        pwrite(fd, fill, 4096, 0); pwrite(fd, fill, 4096, 1024UL*1024*1024-4096); free(fill);
+        void* f; posix_memalign(&f, 4096, 4096); memset(f, 0, 4096);
+        pwrite(fd, f, 4096, 0); pwrite(fd, f, 4096, 1024UL*1024*1024-4096); free(f);
         void* buf; posix_memalign(&buf, 4096, 4096); memset(buf, 'X', 4096);
 
-        std::cout << "\n=== " << type << " Pipeline (Worker Scheduler + Stack Baton) ===" << std::endl;
-        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  BW(MB/s)" << std::endl;
-        std::cout << "  ------|-----------|-----------|-----------|----------" << std::endl;
+        std::cout << "\n=== " << type << " ===" << std::endl;
+        std::cout << "  QD | IOPS(K)  | P50(us)  | P99(us)  | BW(MB/s)" << std::endl;
 
-        for (int qd : qds) {
-            const size_t total_ops = (qd <= 16) ? 2000 : 10000;
-            std::vector<uint64_t> latencies(total_ops);
-            std::atomic<size_t> next_op{0};
-            std::atomic<size_t> done{0};
-            auto t_start = std::chrono::steady_clock::now();
+        for (int qd : {1, 4, 16, 64, 128}) {
+            const size_t N = std::max(2000UL, (size_t)qd * 20);
+            std::vector<uint64_t> lats(N);
+            std::atomic<size_t> next{0}, complete{0};
 
-            // QD 个子协程，每个在 Worker 上持续投递 IO
-            std::vector<SimpleCoro> children;
-            for (int q = 0; q < qd; ++q) {
-                auto child = [&]() -> SimpleCoro {
-                    auto route = w.make_route_func();
-                    while (true) {
-                        size_t op = next_op.fetch_add(1);
-                        if (op >= total_ops) break;
+            auto t0 = std::chrono::steady_clock::now();
 
-                        AffinityBaton baton;
-                        uint64_t t0 = __builtin_ia32_rdtsc();
-
-                        IORequest req;
-                        req.op = IORequest::kWrite; req.fd = fd;
-                        req.offset = op * 4096ULL; req.buf = buf; req.len = 4096;
-                        req.callback = [&baton, &route](IOCompletion) { baton.post(route); };
-                        w.io_backend()->submit(std::move(req));
-                        co_await baton;
-
-                        latencies[op] = __builtin_ia32_rdtsc() - t0;
+            // Worker 上原位创建协程
+            {
+                std::lock_guard<std::mutex> lk(g_bench_mutex);
+                g_bench_fn = [&]() {
+                    for (int q = 0; q < qd; ++q) {
+                        auto child = [&]() -> SimpleCoro {
+                            auto r = w.make_route_func();
+                            while (true) {
+                                size_t op = next.fetch_add(1);
+                                if (op >= N) break;
+                                AffinityBaton b; uint64_t ts = __builtin_ia32_rdtsc();
+                                IORequest rq{IORequest::kWrite, fd, op * 4096ULL, buf, 4096, 0,
+                                    [&b, &r](IOCompletion) { b.post(r); }};
+                                w.io_backend()->submit(std::move(rq));
+                                co_await b;
+                                lats[op] = __builtin_ia32_rdtsc() - ts;
+                            }
+                            complete.fetch_add(1);
+                        }();
                     }
-                    done.fetch_add(1);
-                    co_return;
-                }();
-                children.push_back(std::move(child));
+                };
             }
-            for (auto& c : children) {
-                c.handle.promise().done = &done;
-                w.enqueue_affine(c.handle);
-            }
+            w.submit_engine(WorkItem::make_func(run_bench_fn));
             w.notify();
-            while (done.load() < (size_t)qd)
+
+            while (complete.load() < (size_t)qd)
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
 
-            auto t_end = std::chrono::steady_clock::now();
-            double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
-            std::sort(latencies.begin(), latencies.end());
-            double ghz = 3.0; size_t n = latencies.size();
-            double iops = total_ops / (elapsed_us / 1e6);
-            double bw = iops * 4096 / (1024.0 * 1024.0);
-            printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %6.0f\n",
-                   qd, iops/1000.0, (latencies[n/2]/ghz/1000.0), (latencies[n*99/100]/ghz/1000.0), bw);
+            auto t1 = std::chrono::steady_clock::now();
+            double us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            std::sort(lats.begin(), lats.end());
+            double ghz = 3.0; size_t n = lats.size();
+            printf("  %-3d | %7.1f | %7.2f | %7.2f | %6.0f\n",
+                   qd, N/(us/1e6)/1000.0, (lats[n/2]/ghz/1000.0), (lats[n*99/100]/ghz/1000.0),
+                   N*4096.0/us*1e6/1024.0/1024.0);
         }
         w.stop(); w.join(); close(fd); unlink(path.c_str()); free(buf);
     }

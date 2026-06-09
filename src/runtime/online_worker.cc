@@ -120,47 +120,7 @@ folly::coro::Task<void> OnlineWorker::co_submit_engine(std::function<void()> wor
 
 void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     io_backend_ = io::IOEngine::create(cfg, make_route_func());
-
-    // 轻量级协程类型（与 benchmark SimpleCoro 一致）
-    struct IOCoro {
-        struct promise_type {
-            IOCoro get_return_object() {
-                return IOCoro{std::coroutine_handle<promise_type>::from_promise(*this)};
-            }
-            std::suspend_never initial_suspend() noexcept { return {}; }
-            std::suspend_never final_suspend() noexcept { return {}; }
-            void return_void() noexcept {}
-            void unhandled_exception() noexcept { std::terminate(); }
-        };
-        std::coroutine_handle<promise_type> handle;
-    };
-
-    // 每轮收割后重新入队 P0 的 awaiter
-    struct Reschedule {
-        OnlineWorker* w;
-        bool await_ready() noexcept { return false; }
-        void await_suspend(std::coroutine_handle<> h) noexcept {
-            w->enqueue_affine(h);
-        }
-        void await_resume() noexcept {}
-    };
-
-    auto io_coro = [](storage::io::IIOBackend* io, OnlineWorker* w) -> IOCoro {
-        storage::io::IOCompletion comps[64];
-        while (true) {
-            io->flush_pending();
-            io->flush_submissions();
-            size_t n;
-            while ((n = io->poll(comps, 64)) > 0) {
-                for (size_t i = 0; i < n; ++i)
-                    if (comps[i].callback) comps[i].callback(comps[i]);
-            }
-            // 收割完成 → 重新入队 P0，让 Scheduler 继续轮转
-            co_await Reschedule{w};
-        }
-    }(io_backend_.get(), this);
-
-    enqueue_affine(io_coro.handle);
+    scheduler().set_io_backend(io_backend_.get());
 }
 
 folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(

@@ -38,7 +38,10 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
         for (size_t i = 0; i < n; ++i) {
             if (batch[i].tag == 1) {
                 auto h = batch[i].coro;
-                h.resume();
+                h.resume();       // Step 1: 过 initial_suspend
+                if (!h.done()) {
+                    h.resume();   // Step 2: 进入业务体，可能在 co_await 处挂起
+                }
             } else {
                 auto t0 = now_ns();
                 batch[i].execute();
@@ -66,7 +69,19 @@ folly::coro::Task<void> Scheduler::run() {
     std::vector<WorkItem> batch(kMaxBatchSize);
 
     while (running_.load(std::memory_order_acquire)) {
-        // ── Step 1: 排空 P0 (IO 完成回调 + 协程恢复等) ──
+        // 临时：IO poll（后续恢复 IO poll 协程）
+        if (io_backend_) {
+            io_backend_->flush_pending();
+            io_backend_->flush_submissions();
+            storage::io::IOCompletion io_comps[64];
+            while (true) {
+                size_t io_n = io_backend_->poll(io_comps, 64);
+                if (io_n == 0) break;
+                for (size_t j = 0; j < io_n; ++j)
+                    if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
+            }
+        }
+        // ── Step 1: 排空 P0 ──
         drain_p0(batch, kMaxBatchSize);
 
         // ── Step 2: 快照 + 策略决策 ──
