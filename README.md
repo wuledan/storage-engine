@@ -41,16 +41,16 @@ RPC Layer (DPDK/RDMA) → Consistency Layer → Pluggable Engine → IO Backend 
 - **三级计数**：PerfLevel kNone(0指令) / kCount(~3) / kTrace(~12)，rdtsc 纳秒精度
 - **Shared-Nothing**：每 Worker 独占 IO 队列、内存池、CPU + NUMA 绑定
 
-## Benchmark 概要
+## Performance (NVMe QD=1, Solidigm P41 Plus 1TB)
 
-| 维度 | 数值 |
-|------|------|
-| 协程跨线程恢复 (active) | 982 ns P50 |
-| io_uring QD=128 | 3.39 μs P50, 34.4M IOPS |
-| libaio QD=256 | 4.25 μs P50, 54.5M IOPS |
-| Worker 启动 | 63 μs P50 |
+| Backend | P50 (μs) | RIOP (K) | vs fio |
+|---------|----------|----------|--------|
+| io_uring (SQPOLL) | 21.3 | 27.4 | -1.4% P50 |
+| libaio | 27.8 | 25.6 | +2.6% P50 |
 
-完整报告：[docs/2026-06-08/08-benchmark-report.md](docs/2026-06-08/08-benchmark-report.md)
+- Framework overhead near-zero: baton 47ns, scheduler <1μs/iter
+- Non-blocking SQPOLL: zero io_uring_enter in hot path
+- Full analysis: [docs/2026-06-10/24-io-perf-analysis.md](docs/2026-06-10/24-io-perf-analysis.md)
 
 ## 设计文档
 

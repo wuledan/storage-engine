@@ -28,6 +28,7 @@ public:
     void set_perf(WorkerPerf* perf) noexcept { perf_ = perf; }
     void set_io_backend(storage::io::IIOBackend* backend) noexcept { io_backend_ = backend; }
     void set_affine_idx(size_t idx) noexcept { affine_idx_ = idx; }
+    void set_busy_poll(bool v) noexcept { busy_poll_ = v; }
     void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
 
     // 热替换指定索引的队列（仅允许在 worker 未运行时调用）
@@ -57,6 +58,8 @@ private:
     storage::io::IIOBackend* io_backend_{nullptr};
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
+    bool busy_poll_{false};
+    void run_busy();
     SchedulerStats stats_;
     std::vector<uint64_t> last_poll_times_;
     std::vector<uint64_t> total_dequeued_;

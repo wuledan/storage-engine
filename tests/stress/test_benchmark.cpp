@@ -2,6 +2,7 @@
 #include "runtime/online_worker.h"
 #include "runtime/adapt/affinity_baton.h"
 #include "io/io_engine.h"
+#include "io/io_uring_backend.h"
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -44,7 +45,7 @@ struct BenchCtx {
     uint64_t t_producer{0};
     uint64_t t_resume_gap{0};
     uint64_t t_last_resume{0};
-    std::atomic<uint64_t> baton_rt{0};
+    uint64_t baton_rt{0};
     // co_await 耗时 (挂起→恢复, 含IO等待)
     uint64_t t_coro_suspend{0};
 };
@@ -99,7 +100,7 @@ static void bench_producer() {
                         uint64_t delta = __builtin_ia32_rdtsc() - t0s[q];
                         if (op < ctx.lats->size()) (*ctx.lats)[op] = delta;
                         if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                            ctx.baton_rt.store(__builtin_ia32_rdtsc(), std::memory_order_relaxed);
+                            ctx.baton_rt = __builtin_ia32_rdtsc();
                             baton.post(ctx.w->make_route_func());
                         }
                     }};
@@ -123,7 +124,8 @@ static void bench_producer() {
             ctx.t_coro_suspend += t_resume - t_coro0;
             ctx.t_producer += t_resume - t_loop;
 
-            uint64_t t_pre = ctx.baton_rt.exchange(0, std::memory_order_relaxed);
+            uint64_t t_pre = ctx.baton_rt;
+            ctx.baton_rt = 0;
             if (t_pre > 0) {
                 ctx.t_resume_gap += t_resume - t_pre;
             }
@@ -230,6 +232,122 @@ TEST(BenchmarkIO, CoroutinePipeline) {
     }
 }
 
+// ===== FioAlignedPipeline: io_uring_submit_and_wait per batch =====
+// Aligns with fio's io_uring pattern: one syscall = submit + kernel wait for CQE.
+// CQEs harvested inline in producer coroutine. No baton, no Scheduler IO poll.
+TEST(BenchmarkIO, FioAlignedPipeline) {
+    // Only io_uring — the point is comparing our io_uring_submit pattern with fio's
+    Worker::Config cfg; cfg.cpu_id = 1;
+    OnlineWorker w(cfg);
+    IOBackendConfig io_cfg; io_cfg.type = "io_uring"; io_cfg.queue_depth = 256;
+    try { w.init_io_backend(io_cfg); } catch(...) { std::cout << "SKIP io_uring\n"; return; }
+    w.start();
+
+    std::string path = "/mnt/nvme_test/bench_fl";
+    int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+    assert(fd >= 0);
+    void* prem; posix_memalign(&prem, 4096, 4096); memset(prem, 0, 4096);
+    pwrite(fd, prem, 4096, 0);
+    pwrite(fd, prem, 4096, 1024UL * 1024 * 1024 - 4096);
+    free(prem);
+    void* buf; posix_memalign(&buf, 4096, 4096); memset(buf, 'X', 4096);
+
+    const int qd = 1;
+    const size_t N = 50000;
+    auto* backend = static_cast<IOUringBackend*>(w.io_backend());
+    std::vector<uint64_t> lats(N);
+    std::atomic<size_t> next_batch{0};
+    std::atomic<bool> done{false};
+
+    auto run_producer = [&]() {
+        int64_t wall_t0 = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+
+        std::vector<uint64_t> t0s(qd);
+        std::atomic<size_t> pending{0};
+
+        uint64_t t_submit_total = 0, t_wait_total = 0, t_proc_total = 0;
+        size_t t_count = 0;
+
+        while (true) {
+            size_t batch_start = next_batch.fetch_add(qd, std::memory_order_relaxed);
+            bool has_work = false;
+
+            for (int q = 0; q < qd; ++q) {
+                size_t op = batch_start + q;
+                if (op >= N) break;
+                has_work = true;
+                t0s[q] = __builtin_ia32_rdtsc();
+                pending.fetch_add(1, std::memory_order_relaxed);
+                IORequest req{IORequest::kWrite, fd, op * 4096ULL, buf, 4096, 0,
+                    [&lats, &t0s, q, op](IOCompletion) {
+                        lats[op] = __builtin_ia32_rdtsc() - t0s[q];
+                    }};
+                backend->submit(std::move(req));
+            }
+            if (pending.load(std::memory_order_acquire) == 0) break;
+
+            // 分步测量: submit + kernel wait, 对齐 fio 的 io_uring_submit_and_wait
+            struct io_uring *r = backend->raw_ring();
+            uint64_t t_s0 = __builtin_ia32_rdtsc();
+            int ret = io_uring_submit(r);
+            uint64_t t_s1 = __builtin_ia32_rdtsc();
+            (void)ret;
+
+            struct io_uring_cqe *cqe = nullptr;
+            uint64_t t_w0 = __builtin_ia32_rdtsc();
+            io_uring_wait_cqe(r, &cqe);
+            uint64_t t_w1 = __builtin_ia32_rdtsc();
+
+            t_submit_total += t_s1 - t_s0;
+            t_wait_total += t_w1 - t_w0;
+
+            // process CQE
+            uint64_t idx = reinterpret_cast<uint64_t>(io_uring_cqe_get_data(cqe));
+            if (idx < N) {
+                lats[idx] = t_w1 - t0s[0];
+            }
+            io_uring_cqe_seen(r, cqe);
+            t_proc_total += __builtin_ia32_rdtsc() - t_w1;
+            t_count++;
+            pending.store(0, std::memory_order_release);
+        }
+
+        int64_t wall_t1 = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        double wall_sec = (wall_t1 - wall_t0) / 1e9;
+        double riop = (wall_sec > 0) ? N / wall_sec : 0;
+
+        std::sort(lats.begin(), lats.end());
+        double ghz = 3.0;
+        size_t n = lats.size();
+
+        printf("\n=== fio-aligned io_uring_submit + io_uring_wait_cqe ===\n");
+        printf("  QD=%d N=%zu\n", qd, N);
+        printf("  P50=%.2fus  P90=%.2fus  P99=%.2fus  P999=%.2fus\n",
+               lats[n/2]/ghz/1000.0,
+               lats[n*90/100]/ghz/1000.0,
+               lats[n*99/100]/ghz/1000.0,
+               lats[n*999/1000]/ghz/1000.0);
+        printf("  RIOP=%.1fK  BW=%.0fMB/s\n",
+               riop/1000.0,
+               N * 4096.0 / wall_sec / 1024 / 1024);
+        printf("  submit=%luns  wait=%luns  proc=%luns (N=%zu)\n",
+               (unsigned long)(t_submit_total / t_count / 3.0),
+               (unsigned long)(t_wait_total / t_count / 3.0),
+               (unsigned long)(t_proc_total / t_count / 3.0),
+               t_count);
+
+        done.store(true);
+    };
+    run_producer();
+
+    while (!done.load())
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+
+    w.stop(); w.join(); close(fd); unlink(path.c_str()); free(buf);
+}
+
 // 测量 Scheduler 决策开销
 TEST(BenchmarkIO, SchedulerOverhead) {
     Worker::Config cfg; cfg.cpu_id = 1;
@@ -329,7 +447,17 @@ TEST(BenchmarkIO, BatonRoundTrip) {
     g_cb_to_resume.store(0); g_cb_count.store(0);
     
     for (int i = 0; i < N; ++i) {
-        auto child = [&]() -> struct { struct P { auto get() { return std::coroutine_handle<P>::from_promise(*this); } std::suspend_never i(){return{};} std::suspend_never f()noexcept{return{};} void r(){} void u()noexcept{std::terminate();} }; } {
+        struct BatonCoro {
+            struct promise_type {
+                BatonCoro get_return_object() { return BatonCoro{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+                std::suspend_never initial_suspend() noexcept { return {}; }
+                std::suspend_never final_suspend() noexcept { return {}; }
+                void return_void() noexcept {}
+                void unhandled_exception() noexcept { std::terminate(); }
+            };
+            std::coroutine_handle<promise_type> handle;
+        };
+        auto child = [&]() -> BatonCoro {
             auto route = w.make_route_func();
             AffinityBaton baton;
             IORequest rq{IORequest::kWrite, fd, (uint64_t)i*4096, b, 4096, 0,
@@ -342,10 +470,58 @@ TEST(BenchmarkIO, BatonRoundTrip) {
             g_cb_to_resume.fetch_add(t1 - t0);
             g_cb_count.fetch_add(1);
         }();
-        w.enqueue_affine(child);
+        w.enqueue_affine(child.handle);
     }
     while (g_cb_count.load() < N) std::this_thread::sleep_for(std::chrono::microseconds(50));
     double ghz = 3.0;
     printf("io_uring baton round-trip (co_await→resume): avg=%.1fus\n", g_cb_to_resume.load()/(double)g_cb_count.load()/ghz/1000.0);
     w.stop(); w.join(); close(fd); unlink(p.c_str()); free(b);
+}
+
+static struct io_uring* g_raw_ring{nullptr};
+static std::atomic<size_t> g_raw_count{0};
+static std::atomic<uint64_t> g_raw_total{0};
+
+static void raw_submit_probe_fn() {
+    uint64_t t0 = __builtin_ia32_rdtsc();
+    io_uring_submit(g_raw_ring);
+    uint64_t t1 = __builtin_ia32_rdtsc();
+    g_raw_total.fetch_add(t1 - t0, std::memory_order_relaxed);
+    g_raw_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+TEST(BenchmarkIO, RawSubmitOnSchedulerThread) {
+    Worker::Config cfg; cfg.cpu_id = 1;
+    OnlineWorker w(cfg);
+    IOBackendConfig io; io.type = "io_uring"; io.queue_depth = 256;
+    try { w.init_io_backend(io); } catch(...) { return; }
+    g_raw_ring = static_cast<IOUringBackend*>(w.io_backend())->raw_ring();
+    g_raw_count.store(0); g_raw_total.store(0);
+    w.start();
+
+    const int N = 10000;
+    for (int i = 0; i < N; ++i)
+        w.submit_engine(WorkItem::make_func(raw_submit_probe_fn));
+
+    while (g_raw_count.load() < (size_t)N)
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+
+    uint64_t sched_total = g_raw_total.load();
+    size_t sched_count = g_raw_count.load();
+
+    uint64_t test_total = 0;
+    auto* r = static_cast<IOUringBackend*>(w.io_backend())->raw_ring();
+    for (int i = 0; i < N; ++i) {
+        uint64_t t0 = __builtin_ia32_rdtsc();
+        io_uring_submit(r);
+        uint64_t t1 = __builtin_ia32_rdtsc();
+        test_total += t1 - t0;
+    }
+
+    double ghz = 3.0;
+    printf("io_uring_submit (no pending SQEs, N=%d):\n", N);
+    printf("  Scheduler thread: %.0fns avg (%zu calls)\n", sched_total/(double)sched_count/ghz, sched_count);
+    printf("  Test thread:      %.0fns avg\n", test_total/(double)N/ghz);
+
+    w.stop(); w.join();
 }

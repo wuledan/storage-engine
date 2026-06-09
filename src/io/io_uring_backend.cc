@@ -15,6 +15,10 @@ IOUringBackend::IOUringBackend(size_t queue_depth, IIOBackend::RouteFn route)
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
+    params.flags |= IORING_SETUP_SQPOLL;
+    params.flags |= IORING_SETUP_SQ_AFF;     // 需要 sq_thread_cpu 生效
+    params.sq_thread_idle = 0;               // 永不 idle，紧密自旋
+    params.sq_thread_cpu = 2;               // 绑定 CPU2（同 NUMA0，与 Worker CPU1 隔离）
     int ret = io_uring_queue_init_params(queue_depth_, &ring_, &params);
     if (ret < 0) {
         throw std::runtime_error(
@@ -110,10 +114,19 @@ void IOUringBackend::flush_submissions() {
     }
 }
 
+int IOUringBackend::submit_and_wait(size_t wait_nr) {
+    if (pending_sqe_count_ == 0) return 0;
+    int ret = io_uring_submit_and_wait(&ring_, wait_nr);
+    pending_sqe_count_ = 0;
+    needs_cqe_flush_ = false;  // submit_and_wait 内部已处理 task_work
+    return ret;
+}
+
+void IOUringBackend::flush_cqe_task_work() {
+    io_uring_enter(ring_.enter_ring_fd, 0, 0, IORING_ENTER_GETEVENTS, nullptr);
+}
+
 size_t IOUringBackend::poll(IOCompletion* out, size_t max) {
-    // Auto-flush: 确保缓冲的请求在 poll 前已提交
-    flush_pending();
-    flush_submissions();
     size_t count = 0;
     struct io_uring_cqe* cqe = nullptr;
 

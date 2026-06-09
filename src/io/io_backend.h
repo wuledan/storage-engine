@@ -30,6 +30,8 @@ public:
     virtual void flush_pending() {}
     virtual size_t pending_count() const noexcept { return 0; }
     virtual void flush_submissions() {}  // 默认空操作
+    virtual bool has_sqe_submitted() const { return false; }  // 是否有 SQE 已提交但 CQE 尚未处理
+    virtual void flush_cqe_task_work() {}  // 触发内核 task_work 以推送 CQE 到环形缓冲区
 
     // 轮询 IO 完成事件（非阻塞，返回实际完成数）
     virtual size_t poll(IOCompletion* out, size_t max) = 0;

@@ -51,6 +51,8 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
 }
 
 void Scheduler::run() {
+    if (busy_poll_) { run_busy(); return; }
+
     running_.store(true, std::memory_order_release);
     if (stop_requested_.load(std::memory_order_acquire)) {
         running_.store(false, std::memory_order_release);
@@ -152,6 +154,45 @@ void Scheduler::request_stop() {
     stop_requested_.store(true, std::memory_order_release);
     running_.store(false, std::memory_order_release);
     if (idle_) idle_->notify();
+}
+
+void Scheduler::run_busy() {
+    running_.store(true, std::memory_order_release);
+    if (stop_requested_.load(std::memory_order_acquire)) {
+        running_.store(false, std::memory_order_release);
+        return;
+    }
+
+    constexpr size_t kMaxBatchSize = 64;
+    std::vector<WorkItem> batch(kMaxBatchSize);
+
+    while (running_.load(std::memory_order_acquire)) {
+        uint64_t t_iter = __builtin_ia32_rdtsc();
+
+        if (io_backend_) {
+            io_backend_->flush_pending();
+            io_backend_->flush_submissions();
+            storage::io::IOCompletion io_comps[64];
+            while (true) {
+                size_t io_n = io_backend_->poll(io_comps, 64);
+                if (io_n == 0) break;
+                for (size_t j = 0; j < io_n; ++j)
+                    if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
+            }
+        }
+        drain_p0(batch, kMaxBatchSize);
+
+        for (size_t qi = 0; qi < queues_.size(); ++qi) {
+            if (qi == affine_idx_) continue;
+            size_t n = queues_[qi]->try_dequeue_batch(batch.data(), kMaxBatchSize);
+            if (n == 0) continue;
+            for (size_t i = 0; i < n; ++i)
+                batch[i].execute();
+        }
+
+        probe.iter += __builtin_ia32_rdtsc() - t_iter;
+        probe_count++;
+    }
 }
 
 }  // namespace storage::runtime
