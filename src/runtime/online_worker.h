@@ -29,9 +29,6 @@ public:
     // 向 affine queue 投递协程句柄
     void enqueue_affine(std::coroutine_handle<> h) override;
 
-    // 提交一个协程任务：投递到 engine 队列执行，完成后自动通过 affine queue 恢复调用方协程
-    folly::coro::Task<void> co_submit_engine(std::function<void()> work);
-
     // 创建 RouteFunc，捕获 this 用于 enqueue_affine 路由
     adapt::RouteFunc make_route_func();
 

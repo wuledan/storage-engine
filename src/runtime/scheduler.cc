@@ -67,19 +67,7 @@ folly::coro::Task<void> Scheduler::run() {
     std::vector<WorkItem> batch(kMaxBatchSize);
 
     while (running_.load(std::memory_order_acquire)) {
-        // 临时：IO poll（后续恢复 IO poll 协程）
-        if (io_backend_) {
-            io_backend_->flush_pending();
-            io_backend_->flush_submissions();
-            storage::io::IOCompletion io_comps[64];
-            while (true) {
-                size_t io_n = io_backend_->poll(io_comps, 64);
-                if (io_n == 0) break;
-                for (size_t j = 0; j < io_n; ++j)
-                    if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
-            }
-        }
-        // ── Step 1: 排空 P0 ──
+        // ── Step 1: 排空 P0（IO poll 由常驻协程处理） ──
         drain_p0(batch, kMaxBatchSize);
 
         // ── Step 2: 快照 + 策略决策 ──

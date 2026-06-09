@@ -41,7 +41,6 @@ void IOUringBackend::submit_batch(std::vector<IORequest> requests) {
     }
 
     // 不足最小深度 → 缓冲
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
     for (auto& req : requests)
         incoming_.push_back({std::move(req), 0});
 }
@@ -90,31 +89,17 @@ void IOUringBackend::submit_impl(IORequest req) {
 
 void IOUringBackend::flush_pending() {
     if (buf_cfg_.min_batch_depth == 0) return;
-
-    std::vector<BufferEntry> to_flush;
-    {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
-        if (incoming_.empty()) return;
-        to_flush.swap(incoming_);
-    }
-
-    for (auto& e : to_flush) e.age++;
-
-    bool go = (to_flush.size() >= buf_cfg_.min_batch_depth);
+    // 单线程访问，无需锁
+    for (auto& e : incoming_) e.age++;
+    bool go = (incoming_.size() >= buf_cfg_.min_batch_depth);
     if (!go) {
-        for (auto& e : to_flush) {
+        for (auto& e : incoming_) {
             if (e.age >= buf_cfg_.max_age_iterations) { go = true; break; }
         }
     }
-
-    if (!go) {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
-        incoming_.insert(incoming_.end(), std::make_move_iterator(to_flush.begin()),
-                         std::make_move_iterator(to_flush.end()));
-        return;
-    }
-
-    for (auto& e : to_flush) submit_impl(std::move(e.request));
+    if (!go) return;
+    for (auto& e : incoming_) submit_impl(std::move(e.request));
+    incoming_.clear();
     flush_submissions();
 }
 

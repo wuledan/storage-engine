@@ -4,28 +4,8 @@
 #include "local_work_queue.h"
 #include "policy_factory.h"
 #include "io/io_engine.h"
-#include <mutex>
 
 namespace storage::runtime {
-
-namespace {
-    // 用于 co_submit_engine 的全局桥接状态
-    // WorkItem::Func 是 void(*)()，不支持捕获 lambda，
-    // 因此通过此全局 slot + 静态函数桥接。
-    // 使用 mutex 保护，测试场景为顺序调用，无并发冲突。
-    std::function<void()> g_engine_task;
-    std::mutex g_engine_task_mutex;
-
-    // 静态函数指针，作为 WorkItem::Func 提交
-    void run_engine_task() {
-        std::function<void()> task;
-        {
-            std::lock_guard<std::mutex> lock(g_engine_task_mutex);
-            task = std::move(g_engine_task);
-        }
-        if (task) task();
-    }
-}
 
 OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     : Worker(cfg) {
@@ -84,30 +64,42 @@ adapt::RouteFunc OnlineWorker::make_route_func() {
     };
 }
 
-folly::coro::Task<void> OnlineWorker::co_submit_engine(std::function<void()> work) {
-    auto baton = std::make_shared<adapt::AffinityBaton>();
-    auto route = make_route_func();
-
-    // 将 work + baton post 打包为 std::function，通过全局 slot 桥接
-    {
-        std::lock_guard<std::mutex> lock(g_engine_task_mutex);
-        g_engine_task = [baton, work = std::move(work), route = std::move(route)]() {
-            work();
-            baton->post(route);
-        };
-    }
-
-    submit_engine(WorkItem::make_func(run_engine_task));
-    notify();  // 唤醒 worker，确保引擎队列任务被处理
-
-    co_await *baton;
-}
-
 // ── IO Backend ──
 
 void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     io_backend_ = io::IOEngine::create(cfg, make_route_func());
-    scheduler().set_io_backend(io_backend_.get());
+
+    // IO poll 协程：只收割 CQE，不调 flush_submissions
+    // flush_submissions 由生产者协程自行调用
+    struct IOCoro {
+        struct promise_type {
+            IOCoro get_return_object() { return IOCoro{std::coroutine_handle<promise_type>::from_promise(*this)}; }
+            std::suspend_never initial_suspend() noexcept { return {}; }
+            std::suspend_never final_suspend() noexcept { return {}; }
+            void return_void() noexcept {}
+            void unhandled_exception() noexcept { std::terminate(); }
+        };
+        std::coroutine_handle<promise_type> handle;
+    };
+    struct Reschedule {
+        OnlineWorker* w;
+        bool await_ready() noexcept { return false; }
+        void await_suspend(std::coroutine_handle<> h) noexcept { w->enqueue_affine(h); }
+        void await_resume() noexcept {}
+    };
+
+    auto io_coro = [](storage::io::IIOBackend* io, OnlineWorker* w) -> IOCoro {
+        storage::io::IOCompletion comps[64];
+        while (true) {
+            // 仅收割 CQE，不 flush_submissions（生产者自行 flush）
+            size_t n;
+            while ((n = io->poll(comps, 64)) > 0)
+                for (size_t i = 0; i < n; ++i)
+                    if (comps[i].callback) comps[i].callback(comps[i]);
+            co_await Reschedule{w};
+        }
+    }(io_backend_.get(), this);
+    enqueue_affine(io_coro.handle);
 }
 
 folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(

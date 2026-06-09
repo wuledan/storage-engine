@@ -26,7 +26,6 @@ public:
     void set_policy(SchedulingPolicy* policy) noexcept { policy_ = policy; }
     void set_idle(AdaptiveIdle* idle) noexcept { idle_ = idle; }
     void set_perf(WorkerPerf* perf) noexcept { perf_ = perf; }
-    void set_io_backend(storage::io::IIOBackend* backend) noexcept { io_backend_ = backend; }
     void set_affine_idx(size_t idx) noexcept { affine_idx_ = idx; }
     void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
 
@@ -47,7 +46,6 @@ private:
     SchedulingPolicy* policy_;
     AdaptiveIdle* idle_;
     WorkerPerf* perf_{nullptr};
-    storage::io::IIOBackend* io_backend_{nullptr};
     size_t affine_idx_{SIZE_MAX};
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};

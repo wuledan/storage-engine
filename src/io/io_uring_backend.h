@@ -4,7 +4,6 @@
 #include <liburing.h>
 #include <array>
 #include <vector>
-#include <mutex>
 #include <cstring>
 
 namespace storage::io {
@@ -42,9 +41,8 @@ private:
     size_t queue_depth_;
     struct io_uring ring_;
     std::vector<IORequest> pending_;
-    std::vector<BufferEntry> incoming_;   // 入队侧 (仅 submit 线程写, 持锁)
-    std::vector<BufferEntry> flushing_;   // 出队侧 (仅 Scheduler 线程读, 无锁)
-    std::mutex buffer_mutex_;             // 仅保护 incoming_ → flushing_ 交换
+    std::vector<BufferEntry> incoming_;   // 入队侧
+    std::vector<BufferEntry> flushing_;   // 出队侧
     BufferConfig buf_cfg_;
     size_t submit_count_{0};
     size_t last_buffer_size_{0};
