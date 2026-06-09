@@ -1,5 +1,7 @@
 #include "online_worker.h"
-#include "affine_work_queue.h"
+#include "ring_work_queue.h"
+#include "mpmc_ring.h"
+#include "ring_work_queue.h"
 #include "batched_spsc_work_queue.h"
 #include "local_work_queue.h"
 #include "policy_factory.h"
@@ -12,16 +14,16 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     // Warmup 内存池
     memory_resource().warmup(4 * 1024 * 1024);  // 4MB
     work_item_pool().warmup(1024);
-    idx_affine_ = add_queue(std::make_unique<AffineWorkQueue>(
-        QueueType::kAffine, Priority::kCritical, "affine"));
+    idx_affine_ = add_queue(std::make_unique<RingWorkQueue>(
+        QueueType::kAffine, Priority::kCritical, "affine", 65536));
     scheduler().set_affine_idx(idx_affine_);
     set_affine_q_idx(idx_affine_);
     idx_net_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kNetIO, Priority::kHigh, "net_io"));
     idx_disk_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kDiskIO, Priority::kHigh, "disk_io"));
-    idx_engine_ = add_queue(std::make_unique<AffineWorkQueue>(
-        QueueType::kEngine, Priority::kMedium, "engine", 200000));
+    idx_engine_ = add_queue(std::make_unique<RingWorkQueue>(
+        QueueType::kEngine, Priority::kMedium, "engine", 65536));
     idx_timer_ = add_queue(std::make_unique<AffineWorkQueue>(
         QueueType::kTimer, Priority::kHigh, "timer"));
     set_policy(make_policy(PolicyConfig{"strict_priority"}));
@@ -29,7 +31,7 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
 
 void OnlineWorker::submit_engine(WorkItem item) {
     item.enqueue_ns = perf().record_enqueue(QueueType::kEngine, item.trace_id);
-    auto* q = static_cast<AffineWorkQueue*>(get_queue(idx_engine_));
+    auto* q = static_cast<RingWorkQueue*>(get_queue(idx_engine_));
     if (q) q->enqueue(std::move(item));
     notify();
 }
@@ -51,7 +53,7 @@ void OnlineWorker::submit_disk_io(WorkItem item) {
 }
 
 void OnlineWorker::enqueue_affine(std::coroutine_handle<> h) {
-    auto* q = static_cast<AffineWorkQueue*>(get_queue(idx_affine_));
+    auto* q = static_cast<RingWorkQueue*>(get_queue(idx_affine_));
     if (q) {
         q->enqueue(WorkItem::make_coro(h));
         notify();  // 唤醒可能 idle 的 worker

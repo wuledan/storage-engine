@@ -122,7 +122,7 @@ TEST(BenchmarkIO, CoroutinePipeline) {
         void* buf; posix_memalign(&buf, 4096, 4096); memset(buf, 'X', 4096);
 
         std::cout << "\n=== " << type << " ===" << std::endl;
-        std::cout << "  QD | IOPS(K)  | P50(us)  | P99(us)  | BW(MB/s) | P999(us) " << std::endl;
+        std::cout << "  QD | IOPS(K)  | P50(us)  | P99(us)  | BW(MB/s) " << std::endl;
 
         for (int qd : qds) {
             const size_t N = std::max((size_t)qd * 2000, 50000UL);  // 更长运行时间
@@ -144,13 +144,14 @@ TEST(BenchmarkIO, CoroutinePipeline) {
             std::sort(lats.begin(), lats.end());
             double ghz = 3.0;
             size_t n = lats.size();
-            printf("  %-3d | %7.1f | %7.2f | %7.2f | %6.0f | %7.2f\n",
-                   qd,
-                   N / (us / 1e6) / 1000.0,
-                   (lats[n / 2] / ghz / 1000.0),
-                   (lats[n * 99 / 100] / ghz / 1000.0),
-                   N * 4096.0 / us * 1e6 / 1024.0 / 1024.0,
-                   (lats[n * 999 / 1000] / ghz / 1000.0));
+            uint64_t avg_ns = std::accumulate(lats.begin(), lats.end(), 0ULL) / n / ghz;
+            double iops_lat = 1e9 / (avg_ns > 0 ? (double)avg_ns : 1) * qd;
+            double bw = iops_lat * 4096 / (1024.0 * 1024.0);
+            printf("  %-3d | %7.1f | %7.2f | %7.2f | %6.0f\n",
+                   qd, iops_lat/1000.0,
+                   (lats[n/2]/ghz/1000.0),
+                   (lats[n*99/100]/ghz/1000.0),
+                   bw);
         }
         // 输出 QD=1 的阶段计时
         if (true) {

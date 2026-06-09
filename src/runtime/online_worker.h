@@ -3,6 +3,7 @@
 #include "dispatch_types.h"
 #include "local_work_queue.h"
 #include "affine_work_queue.h"
+#include "ring_work_queue.h"
 #include "io/io_backend.h"
 #include "io/io_engine.h"
 #include <functional>
@@ -43,6 +44,8 @@ public:
         while (old_q->try_dequeue(item)) {
             if (auto* lq = dynamic_cast<LocalWorkQueue*>(new_queue.get())) {
                 lq->try_enqueue(std::move(item));
+            } else if (auto* rq = dynamic_cast<RingWorkQueue*>(new_queue.get())) {
+                rq->enqueue(std::move(item));
             } else if (auto* aq = dynamic_cast<AffineWorkQueue*>(new_queue.get())) {
                 aq->enqueue(std::move(item));
             }

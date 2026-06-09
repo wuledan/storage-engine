@@ -3,6 +3,7 @@
 #include "online_worker.h"
 #include "local_work_queue.h"
 #include "affine_work_queue.h"
+#include "ring_work_queue.h"
 #include <chrono>
 
 namespace storage::runtime {
@@ -82,8 +83,8 @@ bool FeedbackLoop::apply_plan(const DispatchPlan& plan) {
             w.swap_engine_queue(std::make_unique<LocalWorkQueue>(
                 QueueType::kEngine, Priority::kMedium, "engine-direct", 200000));
         } else {
-            w.swap_engine_queue(std::make_unique<AffineWorkQueue>(
-                QueueType::kEngine, Priority::kMedium, "engine-dispatch", 200000));
+            w.swap_engine_queue(std::make_unique<RingWorkQueue>(
+                QueueType::kEngine, Priority::kMedium, "engine-dispatch", 65536));
         }
     }
     return true;
