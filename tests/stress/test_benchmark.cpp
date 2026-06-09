@@ -1091,87 +1091,106 @@ TEST(BenchmarkIO, NVMe_BlockSizeMatrix) {
     }
 }
 
-// ===== Fio-style: submit_batch(N) → 一次 syscall → poll 完成 =====
-TEST(BenchmarkIO, FioStyleBatch) {
+// ===== Fio-style 连续流水线（保持 QD 个 IO 在飞行中，收割一个补一个） =====
+// 手动驱动 IO backend（不启动 Scheduler），避免并发 poll 冲突
+TEST(BenchmarkIO, FioStyleContinuous) {
     std::vector<int> qds = {1, 4, 16, 64, 128, 256};
 
     for (const auto& type : {"io_uring", "libaio"}) {
-        Worker::Config cfg;
-        cfg.cpu_id = 1;
-        OnlineWorker w(cfg);
-        IOBackendConfig io_cfg;
-        io_cfg.type = type;
-        io_cfg.queue_depth = 256;
-        try { w.init_io_backend(io_cfg); } catch(...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
-        w.start();
+        // 直接创建 IIOBackend，不经过 OnlineWorker/Scheduler
+        // 避免并发 poll 冲突
+        std::unique_ptr<IIOBackend> backend;
+        try { backend = IOEngine::create({"io_uring", 256}, nullptr); }
+        catch(...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
 
         std::string path = "/mnt/nvme_test/bench_fio_" + std::string(type);
         int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
         ASSERT_GE(fd, 0);
-        void* fill = nullptr;
-        posix_memalign(&fill, 4096, 4096);
-        memset(fill, 0, 4096);
-        pwrite(fd, fill, 4096, 0);
-        pwrite(fd, fill, 4096, 1024UL*1024*1024 - 4096);
-        free(fill);
+        void* fill; posix_memalign(&fill, 4096, 4096); memset(fill, 0, 4096);
+        pwrite(fd, fill, 4096, 0); pwrite(fd, fill, 4096, 1024UL*1024*1024-4096); free(fill);
+        void* buf; posix_memalign(&buf, 4096, 4096); memset(buf, 'X', 4096);
 
-        void* buf = nullptr;
-        posix_memalign(&buf, 4096, 4096);
-        memset(buf, 'X', 4096);
-
-        std::cout << "\n=== " << type << " Fio-Style Batch (submit_batch N, 1 syscall) ===" << std::endl;
-        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  Avg(us)  |  BW(MB/s)" << std::endl;
+        std::cout << "\n=== " << type << " Fio-Style Continuous (QD in flight, poll+refill) ===" << std::endl;
+        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  BW(MB/s)" << std::endl;
         std::cout << "  ------|-----------|-----------|-----------|-----------|----------" << std::endl;
 
         for (int qd : qds) {
-            const size_t rounds = (qd <= 16) ? 50 : 20;
-            std::vector<uint64_t> latencies;
+            const size_t total_ops = (qd <= 16) ? 5000 : 20000;
+            std::vector<uint64_t> latencies(total_ops, 0);
+            std::atomic<size_t> submitted{0}, completed{0};
+            std::atomic<bool> stop{false};
 
-            for (size_t r = 0; r < rounds; ++r) {
-                std::vector<IORequest> batch;
-                std::atomic<size_t> completed{0};
-                std::vector<uint64_t> round_lat(qd);
+            auto t_start = std::chrono::steady_clock::now();
 
-                for (int i = 0; i < qd; ++i) {
+            // 单线程流水线：保持 QD 个 IO 在飞行中，收割一个补一个
+            std::thread io_thread([&]() {
+                // 初始填充 QD 个 IO
+                for (size_t i = 0; i < (size_t)qd && i < total_ops; ++i) {
+                    size_t s = submitted.fetch_add(1);
                     uint64_t t0 = __builtin_ia32_rdtsc();
-                    size_t slot = i;
                     IORequest req;
                     req.op = IORequest::kWrite;
                     req.fd = fd;
-                    req.offset = (r * qd + i) * 4096ULL;
+                    req.offset = s * 4096ULL;
                     req.buf = buf;
                     req.len = 4096;
-                    req.callback = [&completed, &round_lat, slot, t0](IOCompletion c) {
-                        if (c.result == 4096) round_lat[slot] = __builtin_ia32_rdtsc() - t0;
+                    req.callback = [&completed, &latencies, s, t0](IOCompletion c) {
+                        if (c.result == (int64_t)4096)
+                            latencies[s] = __builtin_ia32_rdtsc() - t0;
                         completed.fetch_add(1);
                     };
-                    batch.push_back(std::move(req));
+                    backend->submit(std::move(req));
                 }
+                backend->flush_pending();
+                backend->flush_submissions();
 
-                w.io_backend()->submit_batch(std::move(batch));  // ← 一次调用
+                // 持续流水线
+                IOCompletion comps[64];
+                while (!stop.load()) {
+                    size_t n = backend->poll(comps, 64);
+                    for (size_t i = 0; i < n; ++i)
+                        if (comps[i].callback) comps[i].callback(comps[i]);
 
-                while (completed.load() < (size_t)qd)
-                    std::this_thread::sleep_for(std::chrono::microseconds(10));
-
-                for (size_t i = 0; i < (size_t)qd; ++i) {
-                    if (round_lat[i] > 0) latencies.push_back(round_lat[i]);
+                    size_t inflight = submitted.load() - completed.load();
+                    while (inflight < (size_t)qd && submitted.load() < total_ops) {
+                        size_t s = submitted.fetch_add(1);
+                        if (s >= total_ops) break;
+                        uint64_t t0 = __builtin_ia32_rdtsc();
+                        IORequest req;
+                        req.op = IORequest::kWrite;
+                        req.fd = fd;
+                        req.offset = s * 4096ULL;
+                        req.buf = buf;
+                        req.len = 4096;
+                        req.callback = [&completed, &latencies, s, t0](IOCompletion c) {
+                            if (c.result == (int64_t)4096)
+                                latencies[s] = __builtin_ia32_rdtsc() - t0;
+                            completed.fetch_add(1);
+                        };
+                        backend->submit(std::move(req));
+                        inflight = submitted.load() - completed.load();
+                    }
+                    backend->flush_pending();
+                    backend->flush_submissions();
+                    if (completed.load() >= total_ops) break;
                 }
-            }
+                stop.store(true);
+            });
 
-            if (!latencies.empty()) {
-                std::sort(latencies.begin(), latencies.end());
-                double ghz = 3.0;
-                size_t n = latencies.size();
-                uint64_t avg_ns = std::accumulate(latencies.begin(),latencies.end(),0ULL) / n / ghz;
-                double actual_iops = 1e9 / (avg_ns > 0 ? avg_ns : 1) * qd / 1000.0;
-                double bw = actual_iops * 4096 * 1000 / (1024.0*1024.0);
-                printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.0f\n",
-                       qd, actual_iops, (latencies[n/2]/ghz/1000.0), (latencies[n*99/100]/ghz/1000.0),
-                       avg_ns/1000.0, bw);
-            }
+            while (completed.load() < total_ops)
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            stop.store(true); io_thread.join();
+
+            auto t_end = std::chrono::steady_clock::now();
+            double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+            std::sort(latencies.begin(), latencies.end());
+            double ghz = 3.0; size_t n = latencies.size();
+            double iops = total_ops / (elapsed_us / 1e6);
+            double bw = iops * 4096 / (1024.0 * 1024.0);
+            printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.0f\n",
+                   qd, iops/1000.0, (latencies[n/2]/ghz/1000.0),
+                   (latencies[n*99/100]/ghz/1000.0), (latencies[n*999/1000]/ghz/1000.0), bw);
         }
-
-        w.stop(); w.join();
         close(fd); unlink(path.c_str()); free(buf);
     }
 }
