@@ -61,6 +61,22 @@
 - 日志：结构化输出，包含 thread_id / coroutine_id / trace_id
 - 命名：snake_case 文件名，PascalCase 类型名，snake_case 函数/变量名
 
+### 5.3 Scheduler 纯净化原则
+
+**所有业务逻辑（IO poll、网络收包、定时器、引擎任务）均以协程任务形式接入多优先级队列，Scheduler 主循环不做任何业务特殊处理。**
+
+```
+Scheduler::run() 主循环:
+  ├─ drain_p0    ← 统一处理所有高优协程（IO poll、AffinityBaton 唤醒等）
+  ├─ snapshot + decide
+  ├─ dequeue + execute P1/P2
+  └─ drain_p0    ← 执行可能产生新 P0
+```
+
+禁止在 Scheduler 主循环中硬编码 `if (io_backend_)`、`if (network_)` 等分支。新增业务模块时，只需将对应的协程句柄投递到合适的优先级队列，Scheduler 自动调度。
+
+**已有违规已清理**：IO poll 原为 Scheduler 内硬编码路径，现已重构为独立 P0 协程（`Reschedule` 模式）。
+
 ## 6. 性能交付约束
 
 ### 6.1 任务级性能预期
