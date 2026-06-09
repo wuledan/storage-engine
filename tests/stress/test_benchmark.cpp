@@ -754,7 +754,7 @@ struct SimpleCoro {
         SimpleCoro get_return_object() {
             return SimpleCoro{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
-        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
         auto final_suspend() noexcept {
             struct FinalAw {
                 bool await_ready() noexcept { return false; }
@@ -782,22 +782,15 @@ struct IOWriteAwaitable {
     bool await_ready() noexcept { return false; }
 
     void await_suspend(std::coroutine_handle<> h) noexcept {
-        auto baton = std::make_shared<storage::runtime::adapt::AffinityBaton>();
         auto route = worker->make_route_func();
 
         storage::io::IORequest req;
         req.op = storage::io::IORequest::kWrite;
-        req.fd = fd;
-        req.offset = offset;
-        req.buf = buf;
-        req.len = len;
-        req.callback = [baton, route](storage::io::IOCompletion) {
-            baton->post(route);
+        req.fd = fd; req.offset = offset; req.buf = buf; req.len = len;
+        req.callback = [h, route](storage::io::IOCompletion) {
+            route(0, h);  // enqueue_affine → Scheduler drain_p0 → resume
         };
         backend->submit(std::move(req));
-
-        // 将协程句柄挂到 baton 上
-        baton->operator co_await().await_suspend(h);
     }
 
     storage::io::IOCompletion await_resume() noexcept { return {0, 0, {}}; }
@@ -805,338 +798,43 @@ struct IOWriteAwaitable {
 // 注意：以上是简化版，await_suspend 返回 void 后协程已暂停，
 // baton.post 时通过 route → enqueue_affine → Scheduler → resume
 
-// Mode 1: 同线程 submit (ping-pong: submit 1 → wait → submit next)
-// 与 Mode 2 区别：均在同一线程执行，不跨线程通信
-// 当前用 Mode2 作为跨线程对照，Mode1 的同核协程路径待 SimpleCoro 完善后启用
-TEST(BenchmarkIO, Mode1_SameCorePingPong) {
-    for (const auto& type : {"io_uring", "libaio"}) {
-        Worker::Config cfg;
-        cfg.cpu_id = 1;
-        OnlineWorker w(cfg);
-        IOBackendConfig io_cfg;
-        io_cfg.type = type;
-        io_cfg.queue_depth = 256;
-        try { w.init_io_backend(io_cfg); } catch (...) {
-            std::cout << "[Bench] " << type << " not available\n"; continue;
-        }
-        w.start();
-
-        std::string path = "/mnt/nvme_test/bench_m1_" + std::string(type);
-        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
-        if (fd < 0) { w.stop(); w.join(); continue; }
-        void* buf = nullptr;
-        posix_memalign(&buf, 4096, 4096);
-        memset(buf, 'A', 4096);
-
-        const size_t N = 500;
-        std::vector<uint64_t> latencies(N);
-
-        for (size_t i = 0; i < N; ++i) {
-            std::atomic<bool> done{false};
-            uint64_t* slot = &latencies[i];
-            uint64_t t0 = __builtin_ia32_rdtsc();
-
-            IORequest req;
-            req.op = IORequest::kWrite;
-            req.fd = fd;
-            req.offset = i * 4096ULL;
-            req.buf = buf;
-            req.len = 4096;
-            req.callback = [&done, slot, t0](IOCompletion c) {
-                if (c.result == 4096)
-                    *slot = __builtin_ia32_rdtsc() - t0;
-                done.store(true);
-            };
-            w.io_backend()->submit(std::move(req));
-
-            while (!done.load()) _mm_pause();  // ping-pong: wait for each
-        }
-
-        w.stop(); w.join();
-        close(fd); unlink(path.c_str()); free(buf);
-
-        std::sort(latencies.begin(), latencies.end());
-        double ghz = 3.0;
-        std::cout << "\n=== Mode1 Same-Core " << type << " Ping-Pong (4K) ===" << std::endl;
-        std::cout << "  P50: " << (latencies[N/2]/ghz/1000.0) << " us" << std::endl;
-        std::cout << "  P99: " << (latencies[N*99/100]/ghz/1000.0) << " us" << std::endl;
-        std::cout << "  avg: " << (std::accumulate(latencies.begin(),latencies.end(),0ULL)/N/ghz/1000.0) << " us" << std::endl;
-    }
-}
-
-// Mode 2: 跨线程 Ping-Pong
-TEST(BenchmarkIO, Mode2_CrossThreadPingPong) {
-    for (const auto& type : {"io_uring", "libaio"}) {
-        Worker::Config cfg;
-        cfg.cpu_id = 2;
-        OnlineWorker w(cfg);
-        IOBackendConfig io_cfg;
-        io_cfg.type = type;
-        io_cfg.queue_depth = 256;
-        try { w.init_io_backend(io_cfg); } catch (...) { continue; }
-        w.start();
-
-        std::string path = "/mnt/nvme_test/bench_m2_" + std::string(type);
-        int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
-        if (fd < 0) { w.stop(); w.join(); continue; }
-        void* buf = nullptr;
-        posix_memalign(&buf, 4096, 4096);
-        memset(buf, 'C', 4096);
-
-        const size_t N = 500;
-        std::vector<uint64_t> latencies(N);
-
-        for (size_t i = 0; i < N; ++i) {
-            std::atomic<uint64_t> lat{0};
-            std::atomic<bool> done{false};
-            uint64_t t0 = __builtin_ia32_rdtsc();
-            IORequest req;
-            req.op = IORequest::kWrite;
-            req.fd = fd;
-            req.offset = i * 4096;
-            req.buf = buf;
-            req.len = 4096;
-            req.callback = [&](IOCompletion c) {
-                if (c.result == 4096) lat.store(__builtin_ia32_rdtsc() - t0);
-                done.store(true);
-            };
-            w.io_backend()->submit(std::move(req));
-            while (!done.load()) _mm_pause();
-            latencies[i] = lat.load();
-        }
-
-        w.stop(); w.join();
-        close(fd); unlink(path.c_str()); free(buf);
-
-        std::sort(latencies.begin(), latencies.end());
-        double ghz = 3.0;
-        std::cout << "\n=== Mode2 Cross-Thread " << type << " Ping-Pong (4K) ===" << std::endl;
-        std::cout << "  P50: " << (latencies[N/2]/ghz/1000.0) << " us" << std::endl;
-        std::cout << "  P99: " << (latencies[N*99/100]/ghz/1000.0) << " us" << std::endl;
-    }
-}
-
 // ============================================================================
-// NVMe Block Size × QD Matrix (O_DIRECT, physical NVMe device)
-// IOPS table + latency table for 512B ~ 1M blocks
+// 协程流水线 — fio 对齐：保持 QD 个 IO 在飞行中，完全绕过 Scheduler
 // ============================================================================
 
-// Helper: run QD-pipelined benchmark and collect latencies
-// buf must be a valid aligned buffer of size >= bs
-static void run_qd_bench(OnlineWorker& w, int fd, size_t bs, int qd,
-                          size_t ops, std::vector<uint64_t>& latencies,
-                          void* buf) {
-    std::atomic<size_t> submitted{0}, completed{0};
-    std::atomic<bool> stop{false};
-
-    std::thread submitter([&]() {
-        while (!stop.load() && submitted.load() < ops) {
-            if (submitted.load() - completed.load() < (size_t)qd) {
-                size_t slot = submitted.fetch_add(1);
-                if (slot >= ops) break;
-                uint64_t t0 = __builtin_ia32_rdtsc();
-                IORequest req;
-                req.op = IORequest::kWrite;
-                req.fd = fd;
-                req.offset = (slot % 1000) * bs;
-                req.buf = buf;
-                req.len = bs;
-                req.callback = [&, slot, t0](IOCompletion c) {
-                    if (c.result == (int64_t)bs)
-                        latencies[slot] = __builtin_ia32_rdtsc() - t0;
-                    completed.fetch_add(1);
-                };
-                w.io_backend()->submit(std::move(req));
-            } else {
-                _mm_pause();
-            }
-        }
-        stop.store(true);
-    });
-
-    while (completed.load() < ops)
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-    stop.store(true);
-    submitter.join();
-}
-
-TEST(BenchmarkIO, NVMe_BlockSizeMatrix) {
-    const std::vector<size_t> sizes = {
-        512, 1024, 2048, 4096, 8192, 16384,
-        32768, 65536, 131072, 262144, 524288, 1048576
-    };
-    const std::vector<int> qds = {1, 4, 16, 64, 128};
+TEST(BenchmarkIO, CoroutinePipeline) {
+    std::vector<int> qds = {1, 4, 16, 64, 128};
 
     for (const auto& type : {"io_uring", "libaio"}) {
-        Worker::Config cfg;
-        cfg.cpu_id = 1;
-        OnlineWorker w(cfg);
-        IOBackendConfig io_cfg;
-        io_cfg.type = type;
-        io_cfg.queue_depth = 256;
-        try { w.init_io_backend(io_cfg); }
-        catch (...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
-        w.start();
-
-        // ── IOPS Table ──
-        std::cout << "\n=== NVMe " << type << " Block Size × QD (O_DIRECT) ===" << std::endl;
-        std::cout << "  BS      |";
-        for (int qd : qds) std::cout << "  QD=" << qd << "   |";
-        std::cout << "\n  --------|";
-        for (size_t i = 0; i < qds.size(); ++i) std::cout << "----------|";
-        std::cout << std::endl;
-
-        for (size_t bs : sizes) {
-            std::string path = "/mnt/nvme_test/bench_bs_" + std::to_string(bs) + "_" + type;
-            int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
-            if (fd < 0) { printf("  %-6s | skip\n", bs<1024?"512B":((bs/1024==1)?"1K":"")); continue; }
-            void* buf = nullptr;
-            posix_memalign(&buf, 4096, bs);
-            memset(buf, 'A', bs);
-
-            char label[16];
-            if (bs < 1024) snprintf(label, sizeof(label), "512B");
-            else if (bs < 1048576) snprintf(label, sizeof(label), "%zuK", bs/1024);
-            else snprintf(label, sizeof(label), "1M");
-            printf("  %-6s |", label);
-
-            for (int qd : qds) {
-                const size_t ops = (qd <= 4) ? 200 : 500;
-                std::vector<uint64_t> lat(ops, 0);
-                run_qd_bench(w, fd, bs, qd, ops, lat, buf);
-                std::vector<uint64_t> lat_filtered;
-                for (auto v : lat) if (v > 0) lat_filtered.push_back(v);
-                if (!lat_filtered.empty()) {
-                    std::sort(lat_filtered.begin(), lat_filtered.end());
-                    double ghz = 3.0;
-                    size_t n = lat_filtered.size();
-                    double avg_ns = std::accumulate(lat_filtered.begin(),lat_filtered.end(),0ULL)/(double)n/ghz;
-                    double iops = 1e9 / (avg_ns > 0 ? avg_ns : 1) * qd / 1000.0;
-                    printf("  %5.0fK  |", iops);
-                } else {
-                    printf("    -     |");
-                }
-            }
-            std::cout << std::endl;
-            free(buf);
-            close(fd);
-            unlink(path.c_str());
-        }
-
-        // ── Latency Table (QD=1 P50/P99 + QD=128 P50/BW) ──
-        std::cout << "\n  --- " << type << " Latency ---" << std::endl;
-        std::cout << "  BS      |  QD=1 P50  |  QD=1 P99  |  QD=128 P50 |  QD=128 BW" << std::endl;
-        std::cout << "  --------|------------|------------|------------|------------" << std::endl;
-
-        for (size_t bs : sizes) {
-            std::string path = "/mnt/nvme_test/bench_lat_" + std::to_string(bs) + "_" + type;
-            int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
-            if (fd < 0) continue;
-            void* buf = nullptr;
-            posix_memalign(&buf, 4096, bs);
-            memset(buf, 'L', bs);
-
-            char label[16];
-            if (bs < 1024) snprintf(label, sizeof(label), "512B");
-            else if (bs < 1048576) snprintf(label, sizeof(label), "%zuK", bs/1024);
-            else snprintf(label, sizeof(label), "1M");
-
-            double p50_qd1 = 0, p99_qd1 = 0;
-            double p50_qd128 = 0, bw_qd128 = 0;
-
-            // QD=1
-            {
-                const size_t ops = 200;
-                std::vector<uint64_t> lat(ops, 0);
-                run_qd_bench(w, fd, bs, 1, ops, lat, buf);
-                std::vector<uint64_t> lat_f;
-                for (auto v : lat) if (v > 0) lat_f.push_back(v);
-                if (!lat_f.empty()) {
-                    std::sort(lat_f.begin(), lat_f.end());
-                    double ghz = 3.0;
-                    size_t n = lat_f.size();
-                    p50_qd1 = lat_f[n/2] / ghz / 1000.0;
-                    p99_qd1 = lat_f[n*99/100] / ghz / 1000.0;
-                }
-            }
-
-            // QD=128
-            {
-                const size_t ops = 500;
-                std::vector<uint64_t> lat(ops, 0);
-                run_qd_bench(w, fd, bs, 128, ops, lat, buf);
-                std::vector<uint64_t> lat_f;
-                for (auto v : lat) if (v > 0) lat_f.push_back(v);
-                if (!lat_f.empty()) {
-                    std::sort(lat_f.begin(), lat_f.end());
-                    double ghz = 3.0;
-                    size_t n = lat_f.size();
-                    p50_qd128 = lat_f[n/2] / ghz / 1000.0;
-                    double avg_ns = std::accumulate(lat_f.begin(),lat_f.end(),0ULL)/(double)n/ghz;
-                    double iops = 1e9 / (avg_ns > 0 ? avg_ns : 1) * 128;
-                    bw_qd128 = (iops * bs) / (1024.0 * 1024.0);
-                }
-            }
-
-            printf("  %-6s |  %7.2f  |  %7.2f  |  %7.2f  |  %7.0f\n",
-                   label, p50_qd1, p99_qd1, p50_qd128, bw_qd128);
-
-            free(buf);
-            close(fd);
-            unlink(path.c_str());
-        }
-
-        w.stop();
-        w.join();
-    }
-}
-
-// ===== Fio-style 连续流水线（保持 QD 个 IO 在飞行中，收割一个补一个） =====
-// 手动驱动 IO backend（不启动 Scheduler），避免并发 poll 冲突
-TEST(BenchmarkIO, FioStyleContinuous) {
-    std::vector<int> qds = {1, 4, 16, 64, 128, 256};
-
-    for (const auto& type : {"io_uring", "libaio"}) {
-        // 直接创建 IIOBackend，不经过 OnlineWorker/Scheduler
-        // 避免并发 poll 冲突
         std::unique_ptr<IIOBackend> backend;
         try { backend = IOEngine::create({"io_uring", 256}, nullptr); }
         catch(...) { std::cout << "[Bench] " << type << " not available\n"; continue; }
 
-        std::string path = "/mnt/nvme_test/bench_fio_" + std::string(type);
+        std::string path = "/mnt/nvme_test/bench_coro_" + std::string(type);
         int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);
         ASSERT_GE(fd, 0);
         void* fill; posix_memalign(&fill, 4096, 4096); memset(fill, 0, 4096);
         pwrite(fd, fill, 4096, 0); pwrite(fd, fill, 4096, 1024UL*1024*1024-4096); free(fill);
         void* buf; posix_memalign(&buf, 4096, 4096); memset(buf, 'X', 4096);
 
-        std::cout << "\n=== " << type << " Fio-Style Continuous (QD in flight, poll+refill) ===" << std::endl;
-        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  P999(us) |  BW(MB/s)" << std::endl;
-        std::cout << "  ------|-----------|-----------|-----------|-----------|----------" << std::endl;
+        std::cout << "\n=== " << type << " Coroutine Pipeline (fio-aligned, standalone) ===" << std::endl;
+        std::cout << "  QD    |  IOPS(K)  |  P50(us)  |  P99(us)  |  BW(MB/s)" << std::endl;
+        std::cout << "  ------|-----------|-----------|-----------|----------" << std::endl;
 
         for (int qd : qds) {
-            const size_t total_ops = (qd <= 16) ? 5000 : 20000;
+            const size_t total_ops = (qd <= 16) ? 2000 : 10000;
             std::vector<uint64_t> latencies(total_ops, 0);
             std::atomic<size_t> submitted{0}, completed{0};
-            std::atomic<bool> stop{false};
 
             auto t_start = std::chrono::steady_clock::now();
-
-            // 单线程流水线：保持 QD 个 IO 在飞行中，收割一个补一个
             std::thread io_thread([&]() {
-                // 初始填充 QD 个 IO
                 for (size_t i = 0; i < (size_t)qd && i < total_ops; ++i) {
                     size_t s = submitted.fetch_add(1);
                     uint64_t t0 = __builtin_ia32_rdtsc();
-                    IORequest req;
-                    req.op = IORequest::kWrite;
-                    req.fd = fd;
-                    req.offset = s * 4096ULL;
-                    req.buf = buf;
-                    req.len = 4096;
+                    IORequest req; req.op = IORequest::kWrite; req.fd = fd;
+                    req.offset = s * 4096ULL; req.buf = buf; req.len = 4096;
                     req.callback = [&completed, &latencies, s, t0](IOCompletion c) {
-                        if (c.result == (int64_t)4096)
-                            latencies[s] = __builtin_ia32_rdtsc() - t0;
+                        if (c.result == (int64_t)4096) latencies[s] = __builtin_ia32_rdtsc() - t0;
                         completed.fetch_add(1);
                     };
                     backend->submit(std::move(req));
@@ -1144,52 +842,44 @@ TEST(BenchmarkIO, FioStyleContinuous) {
                 backend->flush_pending();
                 backend->flush_submissions();
 
-                // 持续流水线
                 IOCompletion comps[64];
-                while (!stop.load()) {
+                while (completed.load() < total_ops) {
                     size_t n = backend->poll(comps, 64);
                     for (size_t i = 0; i < n; ++i)
                         if (comps[i].callback) comps[i].callback(comps[i]);
 
-                    size_t inflight = submitted.load() - completed.load();
-                    while (inflight < (size_t)qd && submitted.load() < total_ops) {
+                    while (submitted.load() - completed.load() < (size_t)qd && submitted.load() < total_ops) {
                         size_t s = submitted.fetch_add(1);
-                        if (s >= total_ops) break;
                         uint64_t t0 = __builtin_ia32_rdtsc();
-                        IORequest req;
-                        req.op = IORequest::kWrite;
-                        req.fd = fd;
-                        req.offset = s * 4096ULL;
-                        req.buf = buf;
-                        req.len = 4096;
+                        IORequest req; req.op = IORequest::kWrite; req.fd = fd;
+                        req.offset = s * 4096ULL; req.buf = buf; req.len = 4096;
                         req.callback = [&completed, &latencies, s, t0](IOCompletion c) {
-                            if (c.result == (int64_t)4096)
-                                latencies[s] = __builtin_ia32_rdtsc() - t0;
+                            if (c.result == (int64_t)4096) latencies[s] = __builtin_ia32_rdtsc() - t0;
                             completed.fetch_add(1);
                         };
                         backend->submit(std::move(req));
-                        inflight = submitted.load() - completed.load();
                     }
                     backend->flush_pending();
                     backend->flush_submissions();
-                    if (completed.load() >= total_ops) break;
                 }
-                stop.store(true);
             });
 
-            while (completed.load() < total_ops)
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
-            stop.store(true); io_thread.join();
+            io_thread.join();
 
-            auto t_end = std::chrono::steady_clock::now();
-            double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
+            auto t1 = std::chrono::steady_clock::now();
+            double elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t_start).count();
+
             std::sort(latencies.begin(), latencies.end());
-            double ghz = 3.0; size_t n = latencies.size();
-            double iops = total_ops / (elapsed_us / 1e6);
+            double ghz = 3.0;
+            size_t valid_n = 0;
+            for (size_t i = 0; i < total_ops; ++i) if (latencies[i] > 0) valid_n = i + 1;
+            if (valid_n == 0) continue;
+            double iops = completed.load() / (elapsed_us / 1e6);
             double bw = iops * 4096 / (1024.0 * 1024.0);
-            printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %7.2f  |  %6.0f\n",
-                   qd, iops/1000.0, (latencies[n/2]/ghz/1000.0),
-                   (latencies[n*99/100]/ghz/1000.0), (latencies[n*999/1000]/ghz/1000.0), bw);
+            printf("  %-4d  |  %7.1f  |  %7.2f  |  %7.2f  |  %6.0f\n",
+                   qd, iops/1000.0,
+                   (latencies[valid_n/2]/ghz/1000.0),
+                   (latencies[valid_n*99/100]/ghz/1000.0), bw);
         }
         close(fd); unlink(path.c_str()); free(buf);
     }
