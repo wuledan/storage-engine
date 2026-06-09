@@ -125,7 +125,7 @@ TEST(BenchmarkIO, CoroutinePipeline) {
         std::cout << "  QD | IOPS(K)  | P50(us)  | P99(us)  | BW(MB/s) | P999(us) " << std::endl;
 
         for (int qd : qds) {
-            const size_t N = std::max((size_t)qd * 10, 2000UL);
+            const size_t N = std::max((size_t)qd * 2000, 50000UL);  // 更长运行时间
             std::vector<uint64_t> lats(N);
             std::atomic<size_t> next_batch{0};
             std::atomic<bool> done{false};
