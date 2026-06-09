@@ -32,6 +32,9 @@ struct BenchCtx {
     std::atomic<size_t>* next_batch;
     std::vector<uint64_t>* lats;
     std::atomic<bool>* done;
+    // Producer-internal wall clock (first IO → last IO, aligning fio)
+    int64_t wall_t0_ns{-1};
+    int64_t wall_t1_ns{-1};
     // Stage timing accumulators (rdtsc, QD=1 only)
     uint64_t t_submit{0};
     uint64_t t_flush{0};
@@ -72,6 +75,11 @@ static void bench_producer() {
                 pending.fetch_add(1, std::memory_order_relaxed);
                 t0s[q] = __builtin_ia32_rdtsc();
 
+                if (ctx.wall_t0_ns < 0) {
+                    ctx.wall_t0_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                }
+
                 IORequest req{
                     IORequest::kWrite, ctx.fd, op * 4096ULL, ctx.buf, 4096, 0,
                     [&baton, &pending, &ctx, &t0s, q, op](IOCompletion) {
@@ -96,6 +104,8 @@ static void bench_producer() {
 
             co_await baton;
         }
+        ctx.wall_t1_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         ctx.done->store(true);
     }();
 
@@ -141,10 +151,12 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
 
             auto t1 = std::chrono::steady_clock::now();
-            double wall_sec = std::chrono::duration<double>(t1 - t0).count();
 
-            double real_iops = N / wall_sec;
-            double real_bw   = N * 4096.0 / wall_sec;  // bytes/sec
+            // 使用 producer 内部 wall clock (仅 IO 生产时间, 对齐 fio)
+            double wall_sec = (g_ctx.wall_t1_ns > 0 && g_ctx.wall_t0_ns > 0)
+                ? (g_ctx.wall_t1_ns - g_ctx.wall_t0_ns) / 1e9 : 0.001;
+            double real_iops = (wall_sec > 0) ? N / wall_sec : 0;
+            double real_bw   = (wall_sec > 0) ? N * 4096.0 / wall_sec : 0;
 
             std::sort(lats.begin(), lats.end());
             double ghz = 3.0;
