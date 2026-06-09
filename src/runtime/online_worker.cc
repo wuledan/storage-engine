@@ -19,7 +19,7 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     idx_net_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kNetIO, Priority::kHigh, "net_io"));
     idx_disk_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
-        QueueType::kDiskIO, Priority::kMedium, "disk_io"));
+        QueueType::kDiskIO, Priority::kHigh, "disk_io"));
     idx_engine_ = add_queue(std::make_unique<AffineWorkQueue>(
         QueueType::kEngine, Priority::kMedium, "engine", 200000));
     idx_timer_ = add_queue(std::make_unique<AffineWorkQueue>(
