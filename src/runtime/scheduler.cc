@@ -64,7 +64,10 @@ void Scheduler::run() {
     std::vector<WorkItem> batch(kMaxBatchSize);
 
     while (running_.load(std::memory_order_acquire)) {
-        // ── Step 1: IO poll + 排空 P0 ──
+        uint64_t t_iter = __builtin_ia32_rdtsc();
+        uint64_t t0 = t_iter;
+
+        // ── Step 1: IO poll ──
         if (io_backend_) {
             io_backend_->flush_pending();
             io_backend_->flush_submissions();
@@ -76,7 +79,9 @@ void Scheduler::run() {
                     if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
             }
         }
+        uint64_t t1 = __builtin_ia32_rdtsc();
         drain_p0(batch, kMaxBatchSize);
+        uint64_t t2 = __builtin_ia32_rdtsc();
 
         // ── Step 2: 快照 + 策略决策 ──
         snapshots.clear();
@@ -92,6 +97,7 @@ void Scheduler::run() {
 
         auto decision = policy_->decide(snapshots, stats_);
         stats_.total_polls++;
+        uint64_t t4 = __builtin_ia32_rdtsc();
 
         // ── Step 3: 全空 → idle ──
         if (decision.idle) {
@@ -130,6 +136,15 @@ void Scheduler::run() {
 
         // Step 4: 任务执行可能产生新 P0 → 排空
         drain_p0(batch, kMaxBatchSize);
+        uint64_t t5 = __builtin_ia32_rdtsc();
+
+        // 累计探针
+        probe.io_poll     += t1 - t0;
+        probe.drain_p0    += t2 - t1;
+        probe.snapshot    += t4 - t2;
+        probe.drain_p0b   += t5 - t4;
+        probe.iter        += t5 - t_iter;
+        probe_count++;
     }
 }
 

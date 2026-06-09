@@ -40,6 +40,12 @@ public:
     const SchedulerStats& stats() const noexcept { return stats_; }
     void reset_stats() noexcept { stats_ = SchedulerStats{}; }
 
+    // 探针：累计各阶段耗时 (rdtsc cycles)
+    struct Probe { uint64_t io_poll{0}, drain_p0{0}, snapshot{0}, decide{0}, dequeue_exec{0}, drain_p0b{0}, iter{0}; };
+    Probe probe;
+    size_t probe_count{0};
+    void reset_probe() { probe = Probe{}; probe_count = 0; }
+
 private:
     void drain_p0(std::vector<WorkItem>& batch, size_t max_batch);
 

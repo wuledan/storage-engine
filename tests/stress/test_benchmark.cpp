@@ -141,7 +141,8 @@ TEST(BenchmarkIO, CoroutinePipeline) {
             std::atomic<size_t> next_batch{0};
             std::atomic<bool> done{false};
 
-            g_ctx = {&w, fd, buf, qd, N, &next_batch, &lats, &done};
+            g_ctx = {&w, fd, buf, qd, N, &next_batch, &lats, &done}; auto s0 = w.scheduler().stats().total_polls;
+            w.scheduler().reset_probe();
 
             auto t0 = std::chrono::steady_clock::now();
             w.submit_engine(WorkItem::make_func(bench_producer));
@@ -151,12 +152,17 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
 
             auto t1 = std::chrono::steady_clock::now();
+            auto s1 = w.scheduler().stats().total_polls;
+            size_t sched_iters = s1 - s0;
 
-            // 使用 producer 内部 wall clock (仅 IO 生产时间, 对齐 fio)
             double wall_sec = (g_ctx.wall_t1_ns > 0 && g_ctx.wall_t0_ns > 0)
                 ? (g_ctx.wall_t1_ns - g_ctx.wall_t0_ns) / 1e9 : 0.001;
             double real_iops = (wall_sec > 0) ? N / wall_sec : 0;
             double real_bw   = (wall_sec > 0) ? N * 4096.0 / wall_sec : 0;
+            if (qd == 1 || qd == 128)
+                printf("       → %zu sched iters, %.1f/op, %zu ns/iter\n",
+                       sched_iters, (double)sched_iters/N,
+                       sched_iters>0? (size_t)(wall_sec*1e9/sched_iters):0);
 
             std::sort(lats.begin(), lats.end());
             double ghz = 3.0;
@@ -183,6 +189,17 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                    g_ctx.t_iowait,
                    g_ctx.t_count);
         }
+        // Scheduler 探针
+        auto& p = w.scheduler().probe;
+        double ghz = 3.0;
+        printf("\n  Scheduler probe (avg ns/iter, %zu iters): poll=%.0f drain0=%.0f snap=%.0f drain0b=%.0f total=%.0f\n",
+               w.scheduler().probe_count,
+               p.io_poll/ghz/(double)w.scheduler().probe_count,
+               p.drain_p0/ghz/(double)w.scheduler().probe_count,
+               p.snapshot/ghz/(double)w.scheduler().probe_count,
+               p.drain_p0b/ghz/(double)w.scheduler().probe_count,
+               p.iter/ghz/(double)w.scheduler().probe_count);
+
         w.stop(); w.join(); close(fd); unlink(path.c_str()); free(buf);
     }
 }
@@ -205,5 +222,19 @@ TEST(BenchmarkIO, SchedulerOverhead) {
     std::cout << "  total_polls: " << polls << std::endl;
     std::cout << "  tasks_exec:  " << tasks << std::endl;
     
+    w.stop(); w.join();
+}
+
+TEST(BenchmarkIO, IterRate) {
+    Worker::Config c; c.cpu_id = 1;
+    OnlineWorker w(c);
+    IOBackendConfig io; io.type = "io_uring"; io.queue_depth = 256;
+    try { w.init_io_backend(io); } catch(...) { return; }
+    w.start();
+    auto s0 = w.scheduler().stats().total_polls;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    auto s1 = w.scheduler().stats().total_polls;
+    auto iters = s1 - s0;
+    printf("Scheduler: %lu iters/sec → %.0f ns/iter\n", iters, 1e9/(double)iters);
     w.stop(); w.join();
 }

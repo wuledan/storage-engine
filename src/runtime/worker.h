@@ -57,8 +57,9 @@ public:
     // 由子类设置 affine 队列索引
     void set_affine_q_idx(size_t idx) { affine_q_idx_ = idx; }
 
-protected:
     Scheduler& scheduler() { return scheduler_; }
+
+protected:
     AdaptiveIdle& idle() { return *idle_; }
     const Config& config() const { return cfg_; }
 
