@@ -24,3 +24,4 @@
 - **Runtime 设计**：[多队列模型、调度策略 API、自适应空闲](2026-06-08/04-runtime-layer.md)
 - **实现计划**：[20 任务 / 55 工时 / 三级测试](2026-06-08/05-runtime-plan.md)
 - **设计修正**：[Online 原子开销优化 / Offline 复用 quant/infra](2026-06-08/06-runtime-refinement.md)
+TODO: huge pages
