@@ -122,7 +122,8 @@ TEST(BenchmarkIO, CoroutinePipeline) {
         void* buf; posix_memalign(&buf, 4096, 4096); memset(buf, 'X', 4096);
 
         std::cout << "\n=== " << type << " ===" << std::endl;
-        std::cout << "  QD | IOPS(K)  | P50(us)  | P99(us)  | BW(MB/s) " << std::endl;
+        std::cout << "  QD | RIOP(K) | LIOP(K) | P50(us) | P90(us) | P99(us) | P999   | P9999  | BW(MB/s)" << std::endl;
+        std::cout << "  ---|---------|---------|---------|---------|---------|--------|--------|---------" << std::endl;
 
         for (int qd : qds) {
             const size_t N = std::max((size_t)qd * 2000, 50000UL);  // 更长运行时间
@@ -140,22 +141,30 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
 
             auto t1 = std::chrono::steady_clock::now();
-            double us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+            double wall_sec = std::chrono::duration<double>(t1 - t0).count();
+
+            double real_iops = N / wall_sec;
+            double real_bw   = N * 4096.0 / wall_sec;  // bytes/sec
+
             std::sort(lats.begin(), lats.end());
             double ghz = 3.0;
             size_t n = lats.size();
             uint64_t avg_ns = std::accumulate(lats.begin(), lats.end(), 0ULL) / n / ghz;
-            double iops_lat = 1e9 / (avg_ns > 0 ? (double)avg_ns : 1) * qd;
-            double bw = iops_lat * 4096 / (1024.0 * 1024.0);
-            printf("  %-3d | %7.1f | %7.2f | %7.2f | %6.0f\n",
-                   qd, iops_lat/1000.0,
-                   (lats[n/2]/ghz/1000.0),
-                   (lats[n*99/100]/ghz/1000.0),
-                   bw);
+            double lat_iops = 1e9 / (avg_ns > 0 ? (double)avg_ns : 1) * qd;
+
+            printf("  %-3d | %7.1f | %7.1f | %7.2f | %7.2f | %7.2f | %7.2f | %7.2f | %6.0f\n",
+                   qd,
+                   real_iops/1000.0,                    // RIOP (K)
+                   lat_iops/1000.0,                     // LIOP (K)
+                   (lats[n/2]/ghz/1000.0),              // P50
+                   (lats[n*90/100]/ghz/1000.0),         // P90
+                   (lats[n*99/100]/ghz/1000.0),         // P99
+                   (lats[n*999/1000]/ghz/1000.0),       // P999
+                   (lats[n*9999/10000]/ghz/1000.0),     // P9999
+                   real_bw/1024/1024);                  // BW (MB/s)
         }
         // 输出 QD=1 的阶段计时
         if (true) {
-            double ghz = 3.0;
             printf("\n  Stage breakdown (rdtsc): submit=%lu/flush=%lu/io=%lu cycles  count=%zu\n",
                    g_ctx.t_submit / (g_ctx.t_count ? g_ctx.t_count : 1),
                    g_ctx.t_flush / (g_ctx.t_count ? g_ctx.t_count : 1),
