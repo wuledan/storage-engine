@@ -29,6 +29,7 @@ public:
     void set_io_backend(storage::io::IIOBackend* backend) noexcept { io_backend_ = backend; }
     void set_affine_idx(size_t idx) noexcept { affine_idx_ = idx; }
     void set_busy_poll(bool v) noexcept { busy_poll_ = v; }
+    void set_disk_io_idx(size_t idx) noexcept { disk_io_idx_ = idx; }
     void reset_stop() noexcept { stop_requested_.store(false, std::memory_order_release); }
 
     // 热替换指定索引的队列（仅允许在 worker 未运行时调用）
@@ -55,6 +56,7 @@ private:
     AdaptiveIdle* idle_;
     WorkerPerf* perf_{nullptr};
     size_t affine_idx_{SIZE_MAX};
+    size_t disk_io_idx_{SIZE_MAX};
     storage::io::IIOBackend* io_backend_{nullptr};
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};

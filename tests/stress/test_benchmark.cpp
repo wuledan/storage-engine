@@ -131,6 +131,19 @@ static void bench_producer() {
             uint64_t t_coro0 = __builtin_ia32_rdtsc();
             co_await baton;
             uint64_t t_resume = __builtin_ia32_rdtsc();
+
+            // One-time SQPOLL health check
+            static bool sq_check_done = false;
+            if (!sq_check_done) {
+                sq_check_done = true;
+                auto* ring = static_cast<IOUringBackend*>(ctx.w->io_backend())->raw_ring();
+                unsigned sq_flags = *ring->sq.kflags;
+                printf("  [SQPOLL mid-bench] sq_kflags=0x%x NEED_WAKEUP=%d sq_tail=%u sq_head=%u\n",
+                       sq_flags,
+                       (sq_flags & IORING_SQ_NEED_WAKEUP) ? 1 : 0,
+                       *ring->sq.ktail,
+                       *ring->sq.khead);
+            }
             ctx.t_coro_suspend += t_resume - t_coro0;
             ctx.t_producer += t_resume - t_loop;
 
@@ -158,6 +171,16 @@ TEST(BenchmarkIO, CoroutinePipeline) {
         try { w.init_io_backend(io_cfg); } catch(...) { std::cout << "SKIP " << type << "\n"; continue; }
         w.scheduler().set_busy_poll(true);
         w.start();
+
+        // Verify SQPOLL kernel thread on io_uring
+        if (IOUringBackend* ring = dynamic_cast<IOUringBackend*>(w.io_backend())) {
+            struct io_uring* r = ring->raw_ring();
+            printf("  SQPOLL probe: setup_flags=0x%x SQPOLL=%d sq_kflags=0x%x NEED_WAKEUP=%d sq_ring=%p\n",
+                   r->flags, !!(r->flags & IORING_SETUP_SQPOLL),
+                   r->sq.kflags ? *r->sq.kflags : 0,
+                   r->sq.kflags ? !!(*r->sq.kflags & IORING_SQ_NEED_WAKEUP) : -1,
+                   (void*)r->sq.ring_ptr);
+        }
 
         std::string path = "/mnt/nvme_test/bench_c_" + std::string(type);
         int fd = open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_DIRECT, 0644);

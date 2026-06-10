@@ -69,7 +69,18 @@ void Scheduler::run() {
         uint64_t t_iter = __builtin_ia32_rdtsc();
         uint64_t t0 = t_iter;
 
-        // ── Step 1: IO poll moved to P1 persistent coroutine ──
+        // P0: baton.post activated producers + P1: disk_io coroutine (inline IO poll)
+        if (io_backend_) {
+            io_backend_->flush_pending();
+            io_backend_->flush_submissions();
+            storage::io::IOCompletion io_comps[64];
+            while (true) {
+                size_t io_n = io_backend_->poll(io_comps, 64);
+                if (io_n == 0) break;
+                for (size_t j = 0; j < io_n; ++j)
+                    if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
+            }
+        }
         uint64_t t1 = __builtin_ia32_rdtsc();
         drain_p0(batch, kMaxBatchSize);
         uint64_t t2 = __builtin_ia32_rdtsc();
@@ -158,18 +169,38 @@ void Scheduler::run_busy() {
     while (running_.load(std::memory_order_acquire)) {
         uint64_t t_iter = __builtin_ia32_rdtsc();
 
+        // P0: baton.post activated producers (always first)
         drain_p0(batch, kMaxBatchSize);
+        uint64_t t1 = __builtin_ia32_rdtsc();
 
+        // P1: disk IO coroutine FIRST (poll CQEs, fire callbacks)
+        if (disk_io_idx_ < queues_.size()) {
+            size_t n = queues_[disk_io_idx_]->try_dequeue_batch(batch.data(), kMaxBatchSize);
+            for (size_t i = 0; i < n; ++i)
+                batch[i].execute();
+        }
+        // Then: engine, net_io, timer (everything else)
         for (size_t qi = 0; qi < queues_.size(); ++qi) {
-            if (qi == affine_idx_) continue;
+            if (qi == affine_idx_ || qi == disk_io_idx_) continue;
             size_t n = queues_[qi]->try_dequeue_batch(batch.data(), kMaxBatchSize);
             if (n == 0) continue;
             for (size_t i = 0; i < n; ++i)
                 batch[i].execute();
         }
+        uint64_t t2 = __builtin_ia32_rdtsc();
 
-        probe.iter += __builtin_ia32_rdtsc() - t_iter;
+        probe.drain_p0   += t1 - t_iter;
+        probe.drain_p0b  += t2 - t1;
+        probe.iter       += t2 - t_iter;
         probe_count++;
+
+        // Report one scheduling cycle timing
+        if (probe_count == 50000) {
+            printf("  [Cycle timing @50K iters] drain_p0=%.0fns drain_all=%.0fns total=%.0fns\n",
+                   probe.drain_p0 / (double)probe_count / 3.0,
+                   probe.drain_p0b / (double)probe_count / 3.0,
+                   probe.iter / (double)probe_count / 3.0);
+        }
     }
 }
 

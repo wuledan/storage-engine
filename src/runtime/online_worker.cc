@@ -84,6 +84,7 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
         QueueType::kNetIO, Priority::kHigh, "net_io"));
     idx_disk_io_ = add_queue(std::make_unique<BatchedSPSCWorkQueue>(
         QueueType::kDiskIO, Priority::kHigh, "disk_io"));
+    scheduler().set_disk_io_idx(idx_disk_io_);
     idx_engine_ = add_queue(std::make_unique<RingWorkQueue>(
         QueueType::kEngine, Priority::kMedium, "engine", 65536));
     idx_timer_ = add_queue(std::make_unique<AffineWorkQueue>(
@@ -95,7 +96,7 @@ void OnlineWorker::submit_engine(WorkItem item) {
     item.enqueue_ns = perf().record_enqueue(QueueType::kEngine, item.trace_id);
     auto* q = static_cast<RingWorkQueue*>(get_queue(idx_engine_));
     if (q) q->enqueue(std::move(item));
-    notify();
+    // notify() removed — busy_poll Scheduler always awake
 }
 
 void OnlineWorker::submit_net_io(WorkItem item) {
@@ -118,7 +119,7 @@ void OnlineWorker::enqueue_affine(std::coroutine_handle<> h) {
     auto* q = static_cast<RingWorkQueue*>(get_queue(idx_affine_));
     if (q) {
         q->enqueue(WorkItem::make_coro(h));
-        notify();  // 唤醒可能 idle 的 worker
+        // notify() removed — busy_poll Scheduler always awake
     }
 }
 
@@ -137,9 +138,6 @@ void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     // Launch persistent IO poll coroutine in P1 (disk_io) queue
     g_io_poll_worker = this;
     auto io_coro = io_poll_coro_fn();
-    // Coroutine auto-started (suspend_never) and auto-enqueued via
-    // co_await reap_io_awaiter{} in the first poll iteration.
-    // Keep handle alive.
     (void)io_coro;
 }
 

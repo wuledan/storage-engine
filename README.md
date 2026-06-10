@@ -43,14 +43,15 @@ RPC Layer (DPDK/RDMA) → Consistency Layer → Pluggable Engine → IO Backend 
 
 ## Performance (NVMe QD=1, Solidigm P41 Plus 1TB)
 
-| Backend | P50 (μs) | RIOP (K) |
-|---------|----------|----------|
-| io_uring (SQPOLL) | 29.3 | 19.4 |
-| libaio | 26.1 | 26.3 |
+| Backend | Framework P50 | fio P50 | Notes |
+|---------|-------------|---------|-------|
+| io_uring (SQPOLL) | 30μs | 47μs | Non-blocking beats blocking |
+| libaio | 26μs | 19μs | Inline submit wins |
 
-- P1 coroutine model: zero-blocking IO poll, nanosecond suspend/resume
-- SQPOLL kernel thread: zero-syscall submission (flush=77ns)
-- Full multi-QD matrix + analysis: [docs/2026-06-10/24-io-perf-analysis.md](docs/2026-06-10/24-io-perf-analysis.md)
+- Scheduler cycle: 328ns (drain_p0 41ns + drain_all 289ns)
+- P1 IO coroutine: nanosecond suspend/resume, zero syscall
+- QD=4 SLC cache: 10-17μs P50 all backends
+- Full analysis: [docs/2026-06-10/24-io-perf-analysis.md](docs/2026-06-10/24-io-perf-analysis.md)
 
 ## 设计文档
 

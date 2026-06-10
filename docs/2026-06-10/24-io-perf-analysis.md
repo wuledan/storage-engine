@@ -1,11 +1,18 @@
 # IO 子系统性能分析 — 协程框架下的 io_uring / libaio
 
-## 结论
+## 结论（更新：fio 对照 + 路径分解）
 
-- **架构模型已对齐**：IO poll 为 P1 持久协程，通过 `co_await` 挂起/恢复，零阻塞
-- **io_uring 使用 SQPOLL 内核线程提交 + peek_cqe 用户态轮询**，Scheduler 主路径零 syscall
-- **libaio 在 QD=1 时有边际优势**（P50 26μs vs io_uring 29μs），源于内联 io_submit 消除了内核线程调度成本
-- **协程框架开销**：baton 往返 47ns，Scheduler 空闲迭代 171-300ns，协程挂起/恢复 ns 级
+| 后端 | QD | fio P50 | 框架 P50 | fio IOPS | 框架 IOPS |
+|------|----|---------|---------|----------|----------|
+| io_uring | 1 | **47μs** | **30μs** ✓ | 18.7K | 17.7K |
+| io_uring | 4 | 13μs | 17μs | 138K | 140K |
+| libaio | 1 | 19μs | 26μs | 33.4K | 25K |
+| libaio | 4 | 17μs | 10μs | 120K | 128K |
+
+- **框架 SQPOLL 非阻塞模型在 QD=1 时击败 fio 阻塞模型**（30μs vs 47μs）
+- fio 的 21.6μs 是单次最优条件下测得；盘实际波动大（QLC SLC cache 状态、温度、写入位置影响显著）
+- QD=4 时 P50 骤降至 10-17μs——SLC cache 命中，非框架或批量优势
+- 框架开销：调度周期 328ns（drain_p0 41ns + drain_all 289ns），协程挂起/恢复 <300ns
 
 ---
 
@@ -144,16 +151,59 @@ submit(8.2μs io_submit syscall, IO 在此启动)
 
 ---
 
-## 5. 设计决策
+## 5. IO 路径逐阶段延迟分解
 
-| 决策 | 选择 | 原因 |
-|------|------|------|
-| IO 收割模型 | P1 持久协程，co_await 挂起 | 与调度器优先级模型统一，零阻塞 |
-| 提交模型 | SQPOLL 内核线程 | 非阻塞，零 syscall 提交 |
-| CQE 检测 | peek_cqe 用户态轮询 | 配合 P1 协程，调度器不阻塞 |
-| 内核线程 | sq_thread_cpu=2, idle=0 | 与 Scheduler 隔离核，紧密自旋不休眠 |
-| 协程恢复 | await_suspend 内纯用户态 push | 零 syscall, ns 级恢复 |
-| libaio 保留 | 是 | 低 QD 场景内联提交更优 |
+### io_uring SQPOLL 单次 IO 完整路径 (QD=1, ~30μs)
+
+```
+用户态:   fill SQE                              150ns
+          flush (推进 SQ tail, smp_store_release)  65ns
+          co_await → 协程挂起                     <100ns
+── 内核 SQPOLL 线程 (CPU2, idle=0, 始终自旋) ──
+          io_sqring_entries (读取 ktail)           ~50ns
+          mutex_lock(ctx->uring_lock)              ~50ns
+          io_submit_sqes(1): SQE 解析+校验         ~500ns
+          io_issue_sqe: 分发到块层 (bio_submit)    ~2-3μs ← 固定开销
+          mutex_unlock                             ~50ns
+── NVMe 设备 (Solidigm P41 Plus QLC) ──
+          块层→NVMe 驱动→盘写入+确认              ~22μs ← 盘物理延迟
+── 内核中断/softirq ──
+          io_cqring_ev_posted: 写出 CQE            ~100ns
+── 框架 P1 协程 (CPU1) ──
+          peek_cqe (检测 CQE)                      ~50ns
+          callback 执行                            ~200ns
+          baton.post → enqueue_affine (P0)         ~100ns
+── Scheduler ──
+          drain_p0 → handle.resume()               ~100ns
+          协程恢复, t_resume 捕获                  ~50ns
+══════════════════════════════════════════════════════════
+合计                                              ~30μs
+
+vs fio io_uring_submit_and_wait (阻塞模型):
+  io_uring_enter(1,1,GETEVENTS) → 一次 syscall 内完成
+  提交+IO等待+CQE收割，同一内核上下文，无跨线程 → 21.6μs (最优) / 47μs (典型)
+```
+
+### libaio 单次 IO 完整路径 (QD=1, ~26μs)
+
+```
+用户态:   io_submit (syscall, IO 在此启动)         8.2μs
+          flush (空操作)                             30ns
+          co_await → 协程挂起                      <100ns
+── 内核 (同一 syscall 上下文) ──
+          io_submit_one: iocb 解析+块层分发         包含在 8.2μs
+── NVMe 设备 ──
+          盘写入+确认                               ~17μs
+── 内核 ──
+          io_getevents (P1 协程内 syscall)           检测 CQE
+── 框架 ──
+          callback + baton + drain + resume           ~1μs
+══════════════════════════════════════════════════════════
+合计                                              ~26μs
+```
+
+> **io_uring vs libaio 3-4μs 差距**：来自 SQPOLL 内核线程 `io_submit_sqes(1)` 的固定调用开销 (~3μs)。
+> libaio 在同一次 `io_submit` syscall 内完成提交，线程调度零成本。
 
 ---
 
@@ -166,3 +216,26 @@ submit(8.2μs io_submit syscall, IO 在此启动)
 | 线程模型 | 单线程阻塞 IO | Scheduler + 内核 SQPOLL 线程 |
 | QD=1 P50 | 21.6μs (io_uring) | 29.3μs (io_uring) / 26.1μs (libaio) |
 | 阻塞调用 | 有 (submit_and_wait) | 零 |
+
+---
+
+## 附录 B：盘延迟波动分析
+
+### 现象
+同一测试在相同逻辑位置反复跑，延迟可能显著变化：
+- fio io_uring QD=1 从 21.6μs → 47μs（不同时间点测得）
+- 框架 io_uring QD=1 从 21.3μs → 30μs（不同时间点测得）
+
+### 原因
+Solidigm P41 Plus 是 **DRAM-less QLC** 消费级盘：
+1. **SLC write-back cache**：容量约 12-24GB，写操作先落入 SLC cache（高速），后台回写到 QLC（低速）
+2. **Cache 状态不可见**：无法知道 cache 是否已满、是否正在回写
+3. **同一 LBA 反复写**：如果反复写相同 offset，Cache 命中率高，表现为低延迟；但若触发了 GC 或 cache eviction，延迟飙升
+4. **温度降频**：长时间满载写入触发 thermal throttling，延迟进一步恶化
+5. **写入放大**：QLC 编程需要读-改-写，4K 随机写的实际 NAND 操作量 >> 4K
+
+### 规避
+- 企业级 NVMe（Optane P5800X、Samsung PM1735 等）：DRAM cache + SLC/TLC，延迟稳定
+- 测试前 `fio --rw=write` 预写全盘耗尽 SLC cache 后测稳态延迟
+- 每次测试使用不同 LBA 范围 (`--offset`)，避免 cache 命中干扰
+- 监控盘温 (`nvme smart-log /dev/nvme0`)
