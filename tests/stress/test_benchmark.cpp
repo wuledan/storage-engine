@@ -118,6 +118,16 @@ static void bench_producer() {
             ctx.t_flush += t_fl1 - t_fl0;
             ctx.t_count++;
 
+            // ── Timing note ──
+            // t_coro0 is captured after flush_submissions() for both backends.
+            // For io_uring: IO starts at flush (66ns syscall → no delay)
+            // For libaio:   IO started during submit() in the for-loop
+            //               (io_submit syscall, 8.3μs on NVMe).
+            //               By the time t_coro0 is captured, IO has been
+            //               running for ~8μs. co_await thus only measures
+            //               the REMAINING IO time.
+            // This is a measurement artifact — P50 (t0s[q] → callback rdtsc)
+            // is the fair comparison metric. See docs/.../24-io-perf-analysis.md
             uint64_t t_coro0 = __builtin_ia32_rdtsc();
             co_await baton;
             uint64_t t_resume = __builtin_ia32_rdtsc();
@@ -140,12 +150,13 @@ static void bench_producer() {
 
 // ===== CoroutinePipeline: 单协程 batch 模式 =====
 TEST(BenchmarkIO, CoroutinePipeline) {
-    std::vector<int> qds = {1};
+    std::vector<int> qds = {1, 4, 8, 16, 32, 64, 128, 256};
     for (const auto& type : {"io_uring", "libaio"}) {
         Worker::Config cfg; cfg.cpu_id = 1;
         OnlineWorker w(cfg);
         IOBackendConfig io_cfg; io_cfg.type = type; io_cfg.queue_depth = 256;
         try { w.init_io_backend(io_cfg); } catch(...) { std::cout << "SKIP " << type << "\n"; continue; }
+        w.scheduler().set_busy_poll(true);
         w.start();
 
         std::string path = "/mnt/nvme_test/bench_c_" + std::string(type);
@@ -206,10 +217,8 @@ TEST(BenchmarkIO, CoroutinePipeline) {
                    (lats[n*999/1000]/ghz/1000.0),       // P999
                    (lats[n*9999/10000]/ghz/1000.0),     // P9999
                    real_bw/1024/1024);                  // BW (MB/s)
-        }
-        // 输出 QD=1 的阶段计时
-        if (true) {
-            printf("\n  Probe (ns): submit=%.0f flush=%.0f co_await=%.0f baton_rt=%.0f producer=%.0f (N=%zu)\n",
+
+            printf("  Probe (ns): submit=%.0f flush=%.0f co_await=%.0f baton_rt=%.0f producer=%.0f (N=%zu)\n",
                    g_ctx.t_submit/(double)g_ctx.t_count/3.0,
                    g_ctx.t_flush/(double)g_ctx.t_count/3.0,
                    g_ctx.t_coro_suspend/(double)g_ctx.t_count/3.0,

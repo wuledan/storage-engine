@@ -69,18 +69,7 @@ void Scheduler::run() {
         uint64_t t_iter = __builtin_ia32_rdtsc();
         uint64_t t0 = t_iter;
 
-        // ── Step 1: IO poll ──
-        if (io_backend_) {
-            io_backend_->flush_pending();
-            io_backend_->flush_submissions();
-            storage::io::IOCompletion io_comps[64];
-            while (true) {
-                size_t io_n = io_backend_->poll(io_comps, 64);
-                if (io_n == 0) break;
-                for (size_t j = 0; j < io_n; ++j)
-                    if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
-            }
-        }
+        // ── Step 1: IO poll moved to P1 persistent coroutine ──
         uint64_t t1 = __builtin_ia32_rdtsc();
         drain_p0(batch, kMaxBatchSize);
         uint64_t t2 = __builtin_ia32_rdtsc();
@@ -169,17 +158,6 @@ void Scheduler::run_busy() {
     while (running_.load(std::memory_order_acquire)) {
         uint64_t t_iter = __builtin_ia32_rdtsc();
 
-        if (io_backend_) {
-            io_backend_->flush_pending();
-            io_backend_->flush_submissions();
-            storage::io::IOCompletion io_comps[64];
-            while (true) {
-                size_t io_n = io_backend_->poll(io_comps, 64);
-                if (io_n == 0) break;
-                for (size_t j = 0; j < io_n; ++j)
-                    if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
-            }
-        }
         drain_p0(batch, kMaxBatchSize);
 
         for (size_t qi = 0; qi < queues_.size(); ++qi) {

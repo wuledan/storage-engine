@@ -104,7 +104,14 @@ endif()
 if(PkgConfig_FOUND)
     pkg_check_modules(HWLOC QUIET hwloc)
 endif()
-if(NOT HWLOC_FOUND)
+if(HWLOC_FOUND)
+    add_library(Hwloc::hwloc INTERFACE IMPORTED)
+    set_target_properties(Hwloc::hwloc PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${HWLOC_LIBRARIES}"
+        INTERFACE_INCLUDE_DIRECTORIES "${HWLOC_INCLUDE_DIRS}"
+    )
+    message(STATUS "Found hwloc (pkg-config): ${HWLOC_LIBRARIES}")
+else()
     find_path(HWLOC_INCLUDE_DIR NAMES hwloc.h)
     find_library(HWLOC_LIBRARY NAMES hwloc)
     if(HWLOC_INCLUDE_DIR AND HWLOC_LIBRARY)

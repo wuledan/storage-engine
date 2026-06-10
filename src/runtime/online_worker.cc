@@ -9,6 +9,68 @@
 
 namespace storage::runtime {
 
+namespace {
+
+OnlineWorker* g_io_poll_worker{nullptr};
+
+// ── IO poll coroutine type ──
+struct IOCoroTask {
+    struct promise_type {
+        IOCoroTask get_return_object() {
+            return IOCoroTask{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        void unhandled_exception() noexcept { std::terminate(); }
+    };
+    std::coroutine_handle<promise_type> handle;
+};
+
+// ── Awaitable: suspend and re-enqueue to P1 (disk_io queue) ──
+// On Scheduler thread — no notify() syscall, pure userspace re-enqueue.
+struct reap_io_awaiter {
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> h) noexcept {
+        auto* w = g_io_poll_worker;
+        if (!w) return;
+        auto* q = static_cast<BatchedSPSCWorkQueue*>(w->get_queue(w->idx_disk_io_));
+        if (q) {
+            auto item = WorkItem::make_coro(h);
+            q->push_batch(&item, 1);
+        }
+        // No notify() — Scheduler thread is already awake
+    }
+    void await_resume() const noexcept {}
+};
+
+// ── Persistent IO poll coroutine ──
+// Suspends via co_await reap_io_awaiter{} — re-enqueues handle to P1.
+// Scheduler resumes via drain_all → P1 dequeue → handle.resume().
+static IOCoroTask io_poll_coro_fn() {
+    io::IOCompletion io_comps[64];
+    while (true) {
+        auto* w = g_io_poll_worker;
+        if (!w) co_return;
+        auto* backend = w->io_backend();
+        if (!backend) co_return;
+
+        backend->flush_pending();
+        backend->flush_submissions();
+        size_t n = backend->poll(io_comps, 64);
+        for (size_t j = 0; j < n; ++j) {
+            if (io_comps[j].callback) {
+                io_comps[j].callback(io_comps[j]);
+            }
+        }
+
+        // Suspend: handle re-enqueued to P1, Scheduler will resume us
+        co_await reap_io_awaiter{};
+    }
+}
+
+}  // anonymous namespace
+
 OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     : Worker(cfg) {
     // Warmup 内存池
@@ -71,6 +133,14 @@ adapt::RouteFunc OnlineWorker::make_route_func() {
 void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     io_backend_ = io::IOEngine::create(cfg, make_route_func());
     scheduler().set_io_backend(io_backend_.get());
+
+    // Launch persistent IO poll coroutine in P1 (disk_io) queue
+    g_io_poll_worker = this;
+    auto io_coro = io_poll_coro_fn();
+    // Coroutine auto-started (suspend_never) and auto-enqueued via
+    // co_await reap_io_awaiter{} in the first poll iteration.
+    // Keep handle alive.
+    (void)io_coro;
 }
 
 folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(
