@@ -57,6 +57,45 @@ RPC Layer (DPDK/RDMA) → Consistency Layer → Pluggable Engine → IO Backend 
 
 详见 [docs/design.md](docs/design.md)
 
+## Benchmarking
+
+### Framework benchmark (CoroutinePipeline)
+```bash
+# Full multi-QD matrix (1-256)
+./scripts/bench.sh
+
+# Quick QD=1 test
+./scripts/bench.sh
+
+# Custom QDs: edit tests/stress/test_benchmark.cpp
+#   std::vector<int> qds = {1, 4, 8};
+```
+
+Output includes per-QD: RIOP(K), LIOP(K), P50/90/99/999/9999(μs), BW(MB/s), and Probe(ns) breakdown (submit, flush, co_await, baton_rt, producer).
+
+### fio comparison
+```bash
+# Compare io_uring at all QDs
+./scripts/fio_compare.sh /mnt/nvme_test/fio_test 1G io_uring
+
+# Compare libaio
+./scripts/fio_compare.sh /mnt/nvme_test/fio_test 1G libaio
+```
+
+### Metrics collected
+| Metric | Description |
+|--------|-------------|
+| RIOP(K) | Real IOPS (wall-clock, thousands) |
+| LIOP(K) | Latency-derived IOPS (1/P50 average) |
+| P50/90/99/999/9999 | Latency percentiles (μs) |
+| BW(MB/s) | Bandwidth |
+| Probe submit | SQE fill time (ns) |
+| Probe flush | Submission time (ns, ~65ns with SQPOLL) |
+| Probe co_await | Coroutine suspend→resume time (ns, includes IO wait) |
+| Probe baton_rt | Baton round-trip time (ns) |
+| Probe producer | Full per-batch producer time (ns) |
+| Scheduler probe | avg ns/iter for drain_p0 / drain_all / total |
+
 ## 构建
 
 ```bash
