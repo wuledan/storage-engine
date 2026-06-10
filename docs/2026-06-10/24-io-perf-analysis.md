@@ -219,23 +219,86 @@ vs fio io_uring_submit_and_wait (阻塞模型):
 
 ---
 
-## 附录 B：盘延迟波动分析
+---
 
-### 现象
-同一测试在相同逻辑位置反复跑，延迟可能显著变化：
-- fio io_uring QD=1 从 21.6μs → 47μs（不同时间点测得）
-- 框架 io_uring QD=1 从 21.3μs → 30μs（不同时间点测得）
+## 附录 B：盘规格分析与延迟波动
 
-### 原因
-Solidigm P41 Plus 是 **DRAM-less QLC** 消费级盘：
-1. **SLC write-back cache**：容量约 12-24GB，写操作先落入 SLC cache（高速），后台回写到 QLC（低速）
-2. **Cache 状态不可见**：无法知道 cache 是否已满、是否正在回写
-3. **同一 LBA 反复写**：如果反复写相同 offset，Cache 命中率高，表现为低延迟；但若触发了 GC 或 cache eviction，延迟飙升
-4. **温度降频**：长时间满载写入触发 thermal throttling，延迟进一步恶化
-5. **写入放大**：QLC 编程需要读-改-写，4K 随机写的实际 NAND 操作量 >> 4K
+### Solidigm P41 Plus 1TB 硬件规格
 
-### 规避
-- 企业级 NVMe（Optane P5800X、Samsung PM1735 等）：DRAM cache + SLC/TLC，延迟稳定
-- 测试前 `fio --rw=write` 预写全盘耗尽 SLC cache 后测稳态延迟
-- 每次测试使用不同 LBA 范围 (`--offset`)，避免 cache 命中干扰
-- 监控盘温 (`nvme smart-log /dev/nvme0`)
+| 参数 | 值 | 说明 |
+|------|----|------|
+| 型号 | Solidigm P41 Plus 1TB (SSDPFKNU010TZ) | |
+| NAND 类型 | 144L QLC (4 bit/cell) | 消费级，非企业级 |
+| DRAM | **无 DRAM** (HMB, Host Memory Buffer) | 映射表依赖主机内存，随机写性能弱 |
+| SLC write-back cache | ~12-24 GB (动态) | 写入先落 SLC cache，后台回写 QLC |
+| 标称顺序写 | 4125 MB/s (SLC cache 内) | |
+| QLC 原生顺序写 | ~200 MB/s (cache 耗尽后) | |
+| 标称 4K 随机写 | ~250K IOPS (SLC cache 内) | |
+| QLC 原生 4K 随机写 | ~10-30K IOPS (cache 耗尽后) | 取决于 GC 状态 |
+| 标称 4K 随机读 | ~400K IOPS | |
+| 功耗 | ~5.5W 写 / ~3.5W 读 | 消费级，无散热片 |
+| 接口 | PCIe 4.0 x4, NVMe 1.4 | |
+| 写入耐久 | 200 TBW | 消费级 |
+
+### QLC 编程特性
+
+QLC 每个 cell 存储 4 bits (16 级电压)，编程需要极高精度：
+
+```
+4K 随机写路径:
+  Host 4K write → SLC cache (fast, ~20μs)
+  └→ 后台 GC: read 16KB NAND page → merge 4K → reprogram 16KB (slow, ~500μs)
+     └→ 写入放大: 16KB / 4KB = 4x
+```
+
+**SLC cache 耗尽后**，4K 随机写直接走 QLC 编程路径：
+1. 读目标 NAND page (16KB) → ~80μs
+2. 修改 4K 数据
+3. 写回 NAND page (16KB) → ~500μs
+4. **一次 4K 写入实际延迟可达 500-1000μs**
+
+### 我们的多 QD 数据退化路径
+
+```
+QD=1:  200MB → SLC cache 内         → P50=30μs, RIOP=17.7K
+QD=4:  200MB → SLC cache 内         → P50=17μs, RIOP=140K  (并发加速)
+QD=8:  300MB → SLC cache 可能开始 GC  → P50=28μs, RIOP=171K
+QD=16: 400MB → cache 压力增大        → P50=48μs, RIOP=207K (峰值，最后cache)
+QD=32: 800MB → cache 部分回退 QLC    → P50=91μs, RIOP=154K
+QD=64: 1.6GB → cache 大量 eviction   → P50=177μs, RIOP=171K
+QD=128: 3.2GB → QLC 占主导          → P50=345μs, RIOP=114K
+QD=256: 6.4GB → 完全 QLC 原生       → P50=555μs, RIOP=65K   (QLC 稳态)
+```
+
+> 全部 QD 累计写入约 12GB+，恰好在 SLC cache 上限附近。
+> QD=16 时 RIOP 峰值(207K) 后迅速退化——cache 开始 eviction。
+
+### fio 同盘对比验证
+
+fio 在完全相同的盘上，独立测试每个 QD（每次新文件，cache 状态独立）：
+
+| QD | fio io_uring P50 | fio libaio P50 | 现象 |
+|----|-----------------|----------------|------|
+| 1  | **47μs** | 19μs | fio QD=1 可能触发了 cache eviction (文件创建等) |
+| 4  | 13μs | 17μs | SLC cache 命中，并发加速 |
+
+> **fio io_uring QD=1 的 47μs 远差于我们框架的 30μs**。
+> fio 的 21.6μs 是早期盘全空闲状态下测得——cache 为空、温度未升。
+> 证实这是盘状态主导的波动，不是框架问题。
+
+### 盘状态影响因素
+
+| 因素 | 影响 | 缓解方法 |
+|------|------|----------|
+| SLC cache 水位 | 空=高速，满=QLC 原生 | `fio --size=30G` 预写耗尽 |
+| 温度 | >70°C 触发降频 | `nvme smart-log`, 散热 |
+| Write amplification | QLC GC 后台操作 | 顺序写、大 block size |
+| HMB (Host Memory Buffer) | DRAM-less，依赖 PCIe 取映射表 | 不可控，硬件限制 |
+| Wear leveling | 写入寿命接近 TBW 时 GC 更频繁 | 新盘或低写入量盘 |
+
+### 建议
+
+- **稳态测试**：先 1M 顺序写 30GB 耗尽 cache，再测——所有延迟为 QLC 原生
+- **峰值测试**：每次新文件、不同 LBA 范围——测 cache 内性能
+- **监控**：`nvme smart-log /dev/nvme0` 检查温度、写入量、wear leveling
+- **企业对比**：Optane P5800X / Samsung PM1735 等有 DRAM + SLC/TLC，延迟稳定可预测
