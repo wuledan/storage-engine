@@ -6,95 +6,97 @@
 
 在低延迟时代，**尽量抛弃一切多余动作**——同步开销、系统调用开销、不必要的数据拷贝。以此为出发点，构建基础、可高度配置的 Runtime 框架。
 
-在此基础上，**依据硬件资源和业务负载，构建排队模型并推导最优选择**，让一切行为透明、可解释、可量化。不靠经验值猜测，靠排队论和数据说话。
-
-## 设计目标
-
-- **高性能存储资源池** — 支持 KV、列存、行存等多引擎适配，统一抽象接口
-- **C++20 协程无阻塞** — 基于 folly::coro 的全链路异步非阻塞 IO，shared-nothing 线程模型
-- **智能调度** — 排队理论指导下的最优化资源配置与调度策略，自适应 Direct/Dispatch 模式
-
 ## 架构
 
 ```
 RPC Layer (DPDK/RDMA) → Consistency Layer → Pluggable Engine → IO Backend (io_uring/libaio/SPDK)
                                     ↕
                           Execution Runtime (C++20 Coroutines)
+                          ├── Online: P0→P1→P2 priority scheduler
+                          └── Offline: NUMA-aware work-stealing executor
 ```
 
 ### 核心模块
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| **Runtime** | ✔ | Online (RTC) + Offline (Worker-Stealing) 协程调度 |
-| **IO Adapter** | ✔ | io_uring / libaio / SPDK 可插拔后端 |
-| **Perf & Trace** | ✔ | 三级计数 + 纳秒直方图 + 请求级 Trace |
-| **Decision System** | ✔ | 排队论驱动的自适应 Dispatch 模式 |
-| **RPC Layer** | ⏳ | DPDK TCP / RDMA userspace |
-| **Consistency** | ⏳ | Quorum / Consensus |
-| **Pluggable Engine** | ⏳ | LSM / B+Tree / Bitcask |
+| **Runtime** | ✔ | Online (priority scheduler) + Offline (work-stealing) |
+| **IO Adapter** | ✔ | io_uring (SQPOLL) / libaio / SPDK 可插拔后端 |
+| **Coroutine Primitives** | ✔ | yield, baton, mutex, semaphore, coro_thread |
+| **SPDK Backend** | ✔ | 用户态 NVMe 驱动 (代码就绪，待环境) |
+| **Perf & Trace** | ⏳ | 三级计数 + 直方图 |
+| **RPC Layer** | ⏳ | DPDK TCP / RDMA |
+| **Pluggable Engine** | ⏳ | LSM / B+Tree |
 
-### 关键特性
+## 快速开始
 
-- **零阻塞 IO 路径**：co_await → io_uring submit → Scheduler poll → 回调 → AffinityBaton → affine queue (P0) → 协程恢复
-- **自适应分发**：排队理论容量分析，自动选择 Direct（per-worker NIC）或 Dispatch（独立 poller）
-- **三级计数**：PerfLevel kNone(0指令) / kCount(~3) / kTrace(~12)，rdtsc 纳秒精度
-- **Shared-Nothing**：每 Worker 独占 IO 队列、内存池、CPU + NUMA 绑定
+### 迁移线程代码
+
+```cpp
+#include "runtime/coro_api.h"
+using namespace storage::runtime;
+
+// std::thread → coro_thread
+coro_thread thr([] { do_work(); });
+co_await thr.join();
+
+// std::mutex → AffinityMutex
+coro_mutex_t mtx;
+co_await mtx.co_lock();
+
+// sem_t → AffinitySemaphore
+coro_sem_t sem(4);
+co_await sem.acquire();
+
+// std::this_thread::yield() → this_coro::yield()
+co_await this_coro::yield();
+```
+
+### 协程原语 (coro_primitives.h)
+
+| 原语 | 用途 | 用法 |
+|------|------|------|
+| `yield()` | 挂起→回来源队列 | `co_await yield()` |
+| `yield_to(idx)` | 挂起→指定队列 | `co_await yield_to(QueueType::kDiskIO)` |
+| `AffinityBaton` | 协程间信号 | `co_await baton` / `baton.post(route)` |
+| `AffinityMutex` | 互斥锁 | `co_await mtx.co_lock()` / `std::lock_guard` |
+| `AffinitySemaphore` | 计数信号量 | `co_await sem.acquire()` / `sem.release()` |
+| `coro_thread` | std::thread 等价 | `coro_thread thr(fn)` / `co_await thr.join()` |
+| `co_submit<R>(fn)` | 提交+返回结果 | `auto r = co_await w.co_submit<int>(fn)` |
+
+### Online vs Offline
+
+| 特性 | Online | Offline |
+|------|--------|---------|
+| 调度 | P0→P1→P2 优先级队列 | Chase-Lev 工作偷取 |
+| 提交 | `submit_engine()` 到当前 worker | `group.submit()` 到全局队列 |
+| 亲和性 | AffinityBaton → enqueue_affine(P0) | AffinityBaton → add_to_worker(id, handle) |
+| IO | 支持 io_uring/libaio/SPDK | 纯 CPU 任务 |
+| 创建 | `worker_spawn(cfg)` | `OfflineWorkerGroup(cfg)` |
 
 ## Performance (NVMe QD=1, Solidigm P41 Plus 1TB)
 
-| Backend | Framework P50 | fio P50 | Notes |
-|---------|-------------|---------|-------|
-| io_uring (SQPOLL) | 30μs | 47μs | Non-blocking beats blocking |
-| libaio | 26μs | 19μs | Inline submit wins |
+| Backend | P50 | RIOP | 模型 |
+|---------|-----|------|------|
+| io_uring (SQPOLL) | 17.9μs | 29.2K | 非阻塞, flush=66ns |
+| libaio | 17.8μs | 33.3K | 内联 submit |
+| fio io_uring | 47μs | 18.7K | 阻塞 submit_and_wait |
 
-- Scheduler cycle: 328ns (drain_p0 41ns + drain_all 289ns)
-- P1 IO coroutine: nanosecond suspend/resume, zero syscall
-- QD=4 SLC cache: 10-17μs P50 all backends
-- Full analysis: [docs/2026-06-10/24-io-perf-analysis.md](docs/2026-06-10/24-io-perf-analysis.md)
-
-## 设计文档
-
-详见 [docs/design.md](docs/design.md)
+- P1 IO 收割协程: Scheduler 周期 328ns (drain_p0 41ns + drain_all 289ns)
+- SQPOLL 内核线程: idle=0 紧密自旋, CPU2 绑定
+- QD=4 SLC cache 命中: 10-17μs P50
+- 详细分析: [docs/2026-06-10/24-io-perf-analysis.md](docs/2026-06-10/24-io-perf-analysis.md)
+- 原语设计: [docs/2026-06-10/25-coroutine-primitives.md](docs/2026-06-10/25-coroutine-primitives.md)
 
 ## Benchmarking
 
-### Framework benchmark (CoroutinePipeline)
 ```bash
-# Full multi-QD matrix (1-256)
+# 框架多 QD 矩阵
 ./scripts/bench.sh
 
-# Quick QD=1 test
-./scripts/bench.sh
-
-# Custom QDs: edit tests/stress/test_benchmark.cpp
-#   std::vector<int> qds = {1, 4, 8};
-```
-
-Output includes per-QD: RIOP(K), LIOP(K), P50/90/99/999/9999(μs), BW(MB/s), and Probe(ns) breakdown (submit, flush, co_await, baton_rt, producer).
-
-### fio comparison
-```bash
-# Compare io_uring at all QDs
+# fio 对照
 ./scripts/fio_compare.sh /mnt/nvme_test/fio_test 1G io_uring
-
-# Compare libaio
-./scripts/fio_compare.sh /mnt/nvme_test/fio_test 1G libaio
 ```
-
-### Metrics collected
-| Metric | Description |
-|--------|-------------|
-| RIOP(K) | Real IOPS (wall-clock, thousands) |
-| LIOP(K) | Latency-derived IOPS (1/P50 average) |
-| P50/90/99/999/9999 | Latency percentiles (μs) |
-| BW(MB/s) | Bandwidth |
-| Probe submit | SQE fill time (ns) |
-| Probe flush | Submission time (ns, ~65ns with SQPOLL) |
-| Probe co_await | Coroutine suspend→resume time (ns, includes IO wait) |
-| Probe baton_rt | Baton round-trip time (ns) |
-| Probe producer | Full per-batch producer time (ns) |
-| Scheduler probe | avg ns/iter for drain_p0 / drain_all / total |
 
 ## 构建
 
@@ -103,4 +105,4 @@ cmake -B build && cmake --build build
 ctest --test-dir build
 ```
 
-要求：GCC 13+, CMake 3.20+, folly, hwloc, GTest, jemalloc, liburing, libaio
+要求: GCC 13+, CMake 3.20+, folly, hwloc, GTest, liburing, libaio
