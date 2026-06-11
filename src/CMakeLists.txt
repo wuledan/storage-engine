@@ -3,8 +3,6 @@
 
 # Core runtime sources
 file(GLOB RUNTIME_SOURCES "runtime/*.cc")
-# Exclude offline_group.cc (depends on WorkStealingExecutor which has been removed)
-list(FILTER RUNTIME_SOURCES EXCLUDE REGEX ".*/offline_group\\.cc$")
 # Include IO backend core files (needed by OnlineWorker::init_io_backend)
 list(APPEND RUNTIME_SOURCES "io/io_backend.cc" "io/io_engine.cc" "io/io_uring_backend.cc" "io/libaio_backend.cc" "io/spdk_backend.cc")
 add_library(runtime STATIC ${RUNTIME_SOURCES})

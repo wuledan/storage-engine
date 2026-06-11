@@ -17,7 +17,10 @@
 
 namespace storage::runtime::adapt {
 
-// 通用路由回调：将协程句柄路由到指定 worker 线程
+// RouteFunc: routes a coroutine handle to the specified worker.
+//   worker_id: target worker's ID (from WaiterNode.worker_id)
+//   handle:    coroutine to resume on that worker
+// The implementation must deliver `handle` to the scheduler of worker `worker_id`.
 using RouteFunc = std::function<void(size_t worker_id, std::coroutine_handle<>)>;
 
 namespace detail {

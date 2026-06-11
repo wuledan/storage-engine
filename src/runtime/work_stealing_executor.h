@@ -1,0 +1,104 @@
+#pragma once
+#include "coro_primitives.h"
+#include "work_stealing_deque.h"
+#include "adaptive_idle.h"
+#include "ring_work_queue.h"
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <string>
+#include <functional>
+
+namespace storage::runtime {
+
+class WorkStealingExecutor {
+public:
+    struct Config {
+        size_t num_workers{0};            // 0 = auto (1 per physical core)
+        std::string name_prefix{"ws"};
+        bool pin_cpus{true};              // CPU affinity
+        bool use_ht_siblings{false};
+        bool numa_aware_stealing{true};   // only steal from same NUMA node
+        size_t steal_attempts{4};         // number of steal attempts before backoff
+    };
+
+    // ── Worker state ──
+    struct WorkerState {
+        size_t id;
+        int numa_node{0};
+        int hwloc_cpu{-1};
+
+        // Work queues
+        std::unique_ptr<WorkStealingDeque> local_deque;  // owner LIFO pop, thief FIFO steal
+
+        // Thread + coordination
+        std::thread thread;
+        std::atomic<bool> running{false};
+        AdaptiveIdle park;               // for parking when idle
+        std::atomic<bool> has_work{false};  // set when work arrives (used by park predicate)
+
+        // Affinity routing
+        std::vector<size_t> numa_peers;   // worker IDs in same NUMA node
+
+        // Stats
+        std::atomic<uint64_t> tasks_executed{0};
+        std::atomic<uint64_t> steals_success{0};
+        std::atomic<uint64_t> steals_failed{0};
+        std::atomic<uint64_t> parks{0};
+    };
+
+    explicit WorkStealingExecutor(const Config& cfg);
+    ~WorkStealingExecutor();
+
+    WorkStealingExecutor(const WorkStealingExecutor&) = delete;
+    WorkStealingExecutor& operator=(const WorkStealingExecutor&) = delete;
+
+    // ── Submission ──
+
+    // Submit from any thread (external or worker). Pushes to global queue.
+    void add(WorkItem item);
+
+    // Route a coroutine handle to a specific worker (affinity resume).
+    void add_to_worker(size_t worker_id, std::coroutine_handle<> h);
+
+    // ── Lifecycle ──
+
+    void start();
+    void stop();
+    void join();
+
+    // ── Query ──
+
+    size_t num_workers() const noexcept { return workers_.size(); }
+    WorkerState& worker(size_t idx) { return *workers_[idx]; }
+    const WorkerState& worker(size_t idx) const { return *workers_[idx]; }
+
+    // Create a RouteFunc for affinity primitives (Baton, Mutex)
+    adapt::RouteFunc make_route_func();
+
+    // Static: current worker on this executor (thread-local)
+    static size_t current_worker_id();
+    static WorkStealingExecutor* current_executor();
+
+private:
+    void worker_loop(WorkerState& ws);
+
+    Config cfg_;
+    std::vector<std::unique_ptr<WorkerState>> workers_;
+
+    // Global submission queue (MPMC ring, all workers + external threads)
+    std::unique_ptr<RingWorkQueue> global_queue_;
+    // Mutex to protect global queue dequeue (RingWorkQueue dequeue is SC-only)
+    std::mutex global_mutex_;
+
+    // TLS
+    static thread_local size_t tl_worker_id_;
+    static thread_local WorkStealingExecutor* tl_executor_;
+
+    // NUMA peer lists
+    std::vector<std::vector<size_t>> numa_peers_;  // per worker: peer indices
+};
+
+}  // namespace storage::runtime

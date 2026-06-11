@@ -1,5 +1,5 @@
 #pragma once
-#include "worker.h"
+#include "coro_primitives.h"
 #include "dispatch_types.h"
 #include "local_work_queue.h"
 #include "affine_work_queue.h"
@@ -10,7 +10,6 @@
 #include <optional>
 #include <type_traits>
 #include <folly/coro/Task.h>
-#include "affinity_baton.h"
 
 namespace storage::runtime {
 

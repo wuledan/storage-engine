@@ -6,6 +6,7 @@
 #include "worker_perf.h"
 #include "object_pool.h"
 #include "memory_pool.h"
+#include "affinity_baton.h"
 #include <folly/Executor.h>
 #include <atomic>
 #include <memory>
@@ -55,6 +56,14 @@ public:
 
     // Default queue for yield() — subclasses override (OnlineWorker uses engine queue)
     virtual size_t default_queue_idx() const noexcept { return 0; }
+
+    // Subclasses override to provide cross-worker routing.
+    // Base: assumes single-worker (current worker = target).
+    virtual adapt::RouteFunc make_route_func() {
+        return [this](size_t /*worker_id*/, std::coroutine_handle<> h) {
+            this->enqueue_affine(h);
+        };
+    }
 
     WorkerPerf& perf() { return perf_; }
     void set_perf_level(PerfLevel lv) { perf_.set_level(lv); }

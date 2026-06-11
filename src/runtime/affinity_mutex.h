@@ -137,7 +137,12 @@ public:
         return LockAwaiter{*this, Waiter{}};
     }
 
-    // ── Non-coroutine (blocking) lock — enables std::lock_guard / std::unique_lock ──
+    // ── Non-coroutine lock — std::lock_guard / std::unique_lock compatible ──
+    //
+    // SAFETY: Only safe when caller and lock holder are on the SAME worker thread.
+    // In multi-worker (offline) scenarios, use co_await mutex.co_lock() instead.
+    // This method spin-waits — calling it cross-worker will deadlock.
+    //
     void lock() noexcept {
         while (!try_lock()) {
             while (state_.load(std::memory_order_relaxed) & kLockedFlag) {

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
+#include "runtime/coro_primitives.h"
 #include "runtime/online_worker.h"
-#include "runtime/affinity_baton.h"
 #include "io/io_engine.h"
 #include "io/io_uring_backend.h"
 #include <thread>

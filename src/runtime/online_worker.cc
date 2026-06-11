@@ -6,7 +6,6 @@
 #include "local_work_queue.h"
 #include "policy_factory.h"
 #include "io/io_engine.h"
-#include "yield_awaiter.h"
 
 namespace storage::runtime {
 

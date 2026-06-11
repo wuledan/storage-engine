@@ -70,6 +70,42 @@ add_runtime_test(test_feedback_loop       test_feedback_loop.cpp)
 
 add_runtime_test(test_co_submit           test_co_submit.cpp)
 
+# Chase-Lev work-stealing deque (needs libatomic for 32-byte std::atomic<WorkItem>)
+add_executable(test_work_stealing_deque test_work_stealing_deque.cpp)
+target_link_libraries(test_work_stealing_deque
+    PRIVATE
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+        atomic
+)
+target_include_directories(test_work_stealing_deque PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_work_stealing_deque PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_work_stealing_deque)
+gtest_discover_tests(test_work_stealing_deque)
+
+# WorkStealingExecutor test (needs libatomic for 32-byte std::atomic<WorkItem>)
+add_executable(test_work_stealing_executor test_work_stealing_executor.cpp)
+target_link_libraries(test_work_stealing_executor
+    PRIVATE
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+        atomic
+)
+target_include_directories(test_work_stealing_executor PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_work_stealing_executor PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_work_stealing_executor)
+gtest_discover_tests(test_work_stealing_executor)
+
 # IO types test (links io library + runtime)
 add_executable(test_io_types test_io_types.cpp)
 target_link_libraries(test_io_types
