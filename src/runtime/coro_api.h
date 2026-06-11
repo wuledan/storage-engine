@@ -28,7 +28,8 @@
 #include <memory>
 #include <atomic>
 #include <type_traits>
-#include <cstring>  // strerror_r
+#include <functional>  // std::invoke, std::invoke_result_t
+#include <cstring>     // strerror_r
 #include <cerrno>
 
 namespace storage::runtime {
@@ -396,5 +397,119 @@ folly::coro::Task<R> co_async(F&& func) {
 // ═══════════════════════════════════════════════════════
 
 using coro_baton_t = adapt::AffinityBaton;
+
+// ═══════════════════════════════════════════════════════════
+// coro_thread — std::thread-like RAII wrapper around
+//               coro_create / coro_join / coro_detach
+//
+// Mirrors std::thread's interface.  Must be constructed from
+// within a worker context (current_online_worker() != nullptr)
+// because coro_create requires it.
+// ═══════════════════════════════════════════════════════════
+
+class coro_thread {
+public:
+    using id = coro_t;
+
+    // ── Default constructor: not joinable ──
+    coro_thread() noexcept = default;
+
+    // ── Move constructor ──
+    coro_thread(coro_thread&& other) noexcept
+        : handle_(other.handle_) {
+        other.handle_ = nullptr;
+    }
+
+    // ── Move assignment ──
+    coro_thread& operator=(coro_thread&& other) noexcept {
+        if (joinable()) detach();
+        handle_ = other.handle_;
+        other.handle_ = nullptr;
+        return *this;
+    }
+
+    // ── Spawning constructor: creates a coroutine that
+    //     executes fn(args...).  Requires worker context.
+    // ──
+    template<typename F, typename... Args>
+    explicit coro_thread(F&& fn, Args&&... args) {
+        // Build a void*() callable that wraps fn(args...)
+        auto wrapper = [fn = std::forward<F>(fn),
+                        ... args = std::forward<Args>(args)]() -> void* {
+            if constexpr (std::is_void_v<std::invoke_result_t<F, Args...>>) {
+                std::invoke(fn, args...);
+                return nullptr;
+            } else {
+                using R = std::invoke_result_t<F, Args...>;
+                auto* result = new R(std::invoke(fn, args...));
+                return static_cast<void*>(result);
+            }
+        };
+
+        using wrapper_t = std::decay_t<decltype(wrapper)>;
+        auto* heap_wrapper = new wrapper_t(std::move(wrapper));
+
+        // Captureless lambda — decays to void* (*)(void*)
+        auto start_fn = [](void* ctx) -> void* {
+            auto* w = static_cast<wrapper_t*>(ctx);
+            void* ret = (*w)();
+            delete w;
+            return ret;
+        };
+
+        int rc = coro_create(&handle_, nullptr, start_fn, heap_wrapper);
+        if (rc != 0) {
+            delete heap_wrapper;
+            handle_ = nullptr;
+        }
+    }
+
+    // ── Destructor: detach if still joinable ──
+    ~coro_thread() {
+        if (joinable()) detach();
+    }
+
+    coro_thread(const coro_thread&) = delete;
+
+    // ── Observers ──
+    bool joinable() const noexcept { return handle_ != nullptr; }
+    id get_id() const noexcept { return handle_; }
+    coro_t native_handle() noexcept { return handle_; }
+
+    // ── Join: returns a co_await-able awaiter.
+    //     Usage:   void* result = co_await thr.join();
+    // ──
+    auto join() {
+        auto h = handle_;
+        handle_ = nullptr;
+        return coro_join(h);
+    }
+
+    // ── Detach: mark for auto-cleanup on completion ──
+    void detach() {
+        if (handle_) {
+            coro_detach(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+    // ── Static ──
+    static id current_id() { return coro_self(); }
+
+private:
+    coro_t handle_{nullptr};
+};
+
+// ── this_coro namespace (like std::this_thread) ──
+namespace this_coro {
+
+    /// Yield the current coroutine (equivalent to co_await yield()).
+    /// Must be called from within a coroutine context.
+    inline auto yield() { return storage::runtime::yield(); }
+
+    /// Return the handle of the current coroutine (or nullptr if none).
+    inline coro_t get_id() { return coro_self(); }
+
+} // namespace this_coro
 
 }  // namespace storage::runtime

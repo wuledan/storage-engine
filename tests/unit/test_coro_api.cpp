@@ -756,3 +756,237 @@ TEST(CoroApi, CoroMutexConcurrent) {
 
     worker_join(w);
 }
+
+// ============================================================================
+// coro_thread — std::thread-like RAII wrapper
+// ============================================================================
+
+// Helper: a callable that stores a value into an atomic<int>
+struct StoreValue {
+    std::atomic<int>* target;
+    int value;
+    void* operator()() const {
+        target->store(value, std::memory_order_release);
+        return nullptr;
+    }
+};
+
+TEST(CoroThread, DefaultConstructed) {
+    coro_thread t;
+    EXPECT_FALSE(t.joinable());
+    EXPECT_EQ(t.get_id(), nullptr);
+    EXPECT_EQ(t.native_handle(), nullptr);
+}
+
+TEST(CoroThread, SpawnAndJoin) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    worker_t w = worker_spawn(cfg);
+    ASSERT_NE(w, nullptr);
+
+    std::atomic<int> val{0};
+
+    // Create coro_thread from within the worker context.
+    // The coroutine is submitted to the engine queue.  After
+    // co_submit returns we wait for it to complete.
+    auto create = w->co_submit<void>([&val]() {
+        coro_thread thr(StoreValue{&val, 42});
+        EXPECT_TRUE(thr.joinable());
+        // thr destructor called here → detaches the handle
+    });
+    folly::coro::blockingWait(std::move(create));
+
+    // Wait for the detached coroutine to complete
+    int spins = 0;
+    while (val.load(std::memory_order_acquire) != 42 && spins < 1000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(val.load(), 42);
+
+    worker_join(w);
+}
+
+TEST(CoroThread, SpawnAndJoinWithArgs) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    worker_t w = worker_spawn(cfg);
+    ASSERT_NE(w, nullptr);
+
+    std::atomic<int> val{0};
+
+    // coro_thread with additional args forwarded to the callable
+    auto create = w->co_submit<void>([&val]() {
+        auto fn = [](std::atomic<int>* t, int v) -> void* {
+            t->store(v, std::memory_order_release);
+            return nullptr;
+        };
+        coro_thread thr(fn, &val, 77);
+        EXPECT_TRUE(thr.joinable());
+    });
+    folly::coro::blockingWait(std::move(create));
+
+    int spins = 0;
+    while (val.load(std::memory_order_acquire) != 77 && spins < 1000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(val.load(), 77);
+
+    worker_join(w);
+}
+
+TEST(CoroThread, MoveSemantics) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    worker_t w = worker_spawn(cfg);
+    ASSERT_NE(w, nullptr);
+
+    std::atomic<int> val{0};
+
+    auto create = w->co_submit<void>([&val]() {
+        coro_thread t1;
+        EXPECT_FALSE(t1.joinable());
+
+        coro_thread t2(StoreValue{&val, 99});
+        EXPECT_TRUE(t2.joinable());
+
+        // Move-assign
+        t1 = std::move(t2);
+        EXPECT_TRUE(t1.joinable());
+        EXPECT_FALSE(t2.joinable());
+        EXPECT_EQ(t2.get_id(), nullptr);
+
+        // Move-construct
+        coro_thread t3(std::move(t1));
+        EXPECT_TRUE(t3.joinable());
+        EXPECT_FALSE(t1.joinable());
+        EXPECT_EQ(t1.get_id(), nullptr);
+    });
+    folly::coro::blockingWait(std::move(create));
+
+    int spins = 0;
+    while (val.load(std::memory_order_acquire) != 99 && spins < 1000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(val.load(), 99);
+
+    worker_join(w);
+}
+
+TEST(CoroThread, Detach) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    worker_t w = worker_spawn(cfg);
+    ASSERT_NE(w, nullptr);
+
+    std::atomic<int> val{0};
+
+    auto create = w->co_submit<void>([&val]() {
+        coro_thread thr(StoreValue{&val, 7});
+        thr.detach();
+        EXPECT_FALSE(thr.joinable());
+    });
+    folly::coro::blockingWait(std::move(create));
+
+    int spins = 0;
+    while (val.load(std::memory_order_acquire) != 7 && spins < 1000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(val.load(), 7);
+
+    worker_join(w);
+}
+
+TEST(CoroThread, DestructorDetaches) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    worker_t w = worker_spawn(cfg);
+    ASSERT_NE(w, nullptr);
+
+    std::atomic<int> val{0};
+
+    // coro_thread goes out of scope (destructor detaches)
+    {
+        auto create = w->co_submit<void>([&val]() {
+            coro_thread thr(StoreValue{&val, 100});
+            EXPECT_TRUE(thr.joinable());
+            // destructor called when lambda returns
+        });
+        folly::coro::blockingWait(std::move(create));
+    }
+
+    int spins = 0;
+    while (val.load(std::memory_order_acquire) != 100 && spins < 1000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(val.load(), 100);
+
+    worker_join(w);
+}
+
+TEST(CoroThread, NativeHandle) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    worker_t w = worker_spawn(cfg);
+    ASSERT_NE(w, nullptr);
+
+    auto create = w->co_submit<coro_t>([]() -> coro_t {
+        coro_thread thr(+[]() -> void* { return nullptr; });
+        coro_t h = thr.native_handle();
+        EXPECT_NE(h, nullptr);
+        EXPECT_EQ(thr.get_id(), h);
+        return h;
+    });
+
+    // Just verify we got a non-null handle
+    coro_t handle = folly::coro::blockingWait(std::move(create));
+    EXPECT_NE(handle, nullptr);
+
+    worker_join(w);
+}
+
+// ============================================================================
+// this_coro namespace
+// ============================================================================
+
+TEST(CoroThread, ThisCoroGetIdOutsideCoroutine) {
+    // Outside any coroutine context, get_id() returns nullptr.
+    coro_t id = this_coro::get_id();
+    EXPECT_EQ(id, nullptr);
+}
+
+TEST(CoroThread, ThisCoroGetIdInsideCoroutine) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    worker_t w = worker_spawn(cfg);
+    ASSERT_NE(w, nullptr);
+
+    std::atomic<coro_t> id_inside{nullptr};
+
+    // Create a coroutine via coro_thread and get the handle from inside
+    auto create = w->co_submit<void>([&id_inside]() {
+        coro_thread thr(+[](void* arg) -> void* {
+            auto* out = static_cast<std::atomic<coro_t>*>(arg);
+            out->store(this_coro::get_id(), std::memory_order_release);
+            return nullptr;
+        }, &id_inside);
+        // thr detaches on destruction
+    });
+    folly::coro::blockingWait(std::move(create));
+
+    int spins = 0;
+    while (id_inside.load(std::memory_order_acquire) == nullptr && spins < 1000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+
+    // The handle returned by this_coro::get_id() from inside the
+    // coro_thread-created coroutine should be non-null.
+    EXPECT_NE(id_inside.load(), nullptr);
+
+    worker_join(w);
+}
