@@ -1,5 +1,0 @@
-if(EXISTS "/home/wuledan/work/proj/storage-engine/build_debug/tests/stress/test_idle_degradation[1]_tests.cmake")
-  include("/home/wuledan/work/proj/storage-engine/build_debug/tests/stress/test_idle_degradation[1]_tests.cmake")
-else()
-  add_test(test_idle_degradation_NOT_BUILT test_idle_degradation_NOT_BUILT)
-endif()

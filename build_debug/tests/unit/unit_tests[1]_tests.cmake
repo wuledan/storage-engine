@@ -1,5 +1,0 @@
-add_test([=[BuildTest.SanityCheck]=]  /home/wuledan/work/proj/storage-engine/build_debug/tests/unit/unit_tests [==[--gtest_filter=BuildTest.SanityCheck]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[BuildTest.SanityCheck]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_debug/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[BuildTest.FollyLink]=]  /home/wuledan/work/proj/storage-engine/build_debug/tests/unit/unit_tests [==[--gtest_filter=BuildTest.FollyLink]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[BuildTest.FollyLink]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_debug/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set(  unit_tests_TESTS BuildTest.SanityCheck BuildTest.FollyLink)

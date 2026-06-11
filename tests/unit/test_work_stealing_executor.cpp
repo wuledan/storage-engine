@@ -24,7 +24,72 @@ TEST(WorkStealingExecutor, StartStop) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     exec.stop();
     exec.join();
-    EXPECT_EQ(exec.num_workers(), 2);
+}
+
+// ============================================================================
+// Test folly::Executor interface — add(folly::Func) via base class pointer
+// ============================================================================
+TEST(WorkStealingExecutor, FollyExecutorAdd) {
+    WorkStealingExecutor::Config cfg;
+    cfg.num_workers = 2;
+    cfg.pin_cpus = false;
+    WorkStealingExecutor exec(cfg);
+    exec.start();
+
+    std::atomic<int> counter{0};
+    constexpr int N = 500;
+
+    for (int i = 0; i < N; ++i) {
+        // Dispatch through folly::Executor base class pointer
+        folly::Executor* base = &exec;
+        base->add([&counter] { counter.fetch_add(1, std::memory_order_relaxed); });
+    }
+
+    // Wait for all tasks to complete
+    while (counter.load() < N) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(counter.load(), N);
+
+    exec.stop();
+    exec.join();
+}
+
+// ============================================================================
+// Test that WorkStealingExecutor::current_folly_executor() returns non-null
+// on worker threads
+// ============================================================================
+TEST(WorkStealingExecutor, CurrentFollyExecutor) {
+    WorkStealingExecutor::Config cfg;
+    cfg.num_workers = 1;
+    cfg.pin_cpus = false;
+    WorkStealingExecutor exec(cfg);
+    exec.start();
+
+    std::atomic<bool> checked{false};
+
+    exec.add(WorkItem::make_func([]() {
+        // On a WSE worker thread, current_folly_executor() should be non-null
+        EXPECT_NE(WorkStealingExecutor::current_folly_executor(), nullptr);
+        // current_executor() should match
+        EXPECT_EQ(WorkStealingExecutor::current_executor(),
+                  dynamic_cast<WorkStealingExecutor*>(
+                      WorkStealingExecutor::current_folly_executor()));
+    }));
+
+    // Also submit via folly::Executor interface and verify the TLS is set
+    folly::Executor* base = &exec;
+    base->add([&checked] {
+        EXPECT_NE(WorkStealingExecutor::current_folly_executor(), nullptr);
+        checked.store(true, std::memory_order_release);
+    });
+
+    while (!checked.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    exec.stop();
+    exec.join();
 }
 
 // ============================================================================

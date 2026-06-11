@@ -1,5 +1,0 @@
-if(EXISTS "/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_affinity_routing[1]_tests.cmake")
-  include("/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_affinity_routing[1]_tests.cmake")
-else()
-  add_test(test_affinity_routing_NOT_BUILT test_affinity_routing_NOT_BUILT)
-endif()

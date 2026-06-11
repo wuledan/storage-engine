@@ -1,5 +1,0 @@
-if(EXISTS "/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_memory_pool[1]_tests.cmake")
-  include("/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_memory_pool[1]_tests.cmake")
-else()
-  add_test(test_memory_pool_NOT_BUILT test_memory_pool_NOT_BUILT)
-endif()

@@ -4,6 +4,7 @@
 #include "adaptive_idle.h"
 #include "ring_work_queue.h"
 #include "local_work_queue.h"
+#include <folly/Executor.h>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -14,7 +15,7 @@
 
 namespace storage::runtime {
 
-class WorkStealingExecutor {
+class WorkStealingExecutor : public folly::Executor {
 public:
     struct Config {
         size_t num_workers{0};            // 0 = auto (1 per physical core)
@@ -57,6 +58,9 @@ public:
     WorkStealingExecutor(const WorkStealingExecutor&) = delete;
     WorkStealingExecutor& operator=(const WorkStealingExecutor&) = delete;
 
+    // ── folly::Executor ──
+    void add(folly::Func func) override;
+
     // ── Submission ──
 
     // Submit from any thread (external or worker). Pushes to global queue.
@@ -84,6 +88,11 @@ public:
     static size_t current_worker_id();
     static WorkStealingExecutor* current_executor();
 
+    // folly::Executor TLS for this thread (nullptr if not on a WSE worker)
+    static folly::Executor* current_folly_executor() {
+        return tl_folly_executor_;
+    }
+
 private:
     void worker_loop(WorkerState& ws);
 
@@ -98,6 +107,9 @@ private:
     // TLS
     static thread_local size_t tl_worker_id_;
     static thread_local WorkStealingExecutor* tl_executor_;
+
+    // folly::Executor TLS — set in worker_loop for coro integration
+    static thread_local folly::Executor* tl_folly_executor_;
 
     // NUMA peer lists
     std::vector<std::vector<size_t>> numa_peers_;  // per worker: peer indices
