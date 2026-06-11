@@ -53,6 +53,9 @@ public:
 
     WorkQueue* get_queue(size_t idx) const { return scheduler_.get_queue(idx); }
 
+    // Default queue for yield() — subclasses override (OnlineWorker uses engine queue)
+    virtual size_t default_queue_idx() const noexcept { return 0; }
+
     WorkerPerf& perf() { return perf_; }
     void set_perf_level(PerfLevel lv) { perf_.set_level(lv); }
 

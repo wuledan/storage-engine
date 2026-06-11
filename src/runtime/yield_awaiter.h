@@ -29,4 +29,15 @@ struct yield_awaiter {
 
 inline yield_awaiter yield_to(size_t queue_idx) { return {queue_idx}; }
 
+// Simple yield: suspend and re-enqueue to the current worker's default queue.
+// For OnlineWorker, this is the engine queue (P2).
+// Equivalent to std::this_thread::yield() — cooperative, non-blocking.
+//
+// Usage:  co_await yield();
+//
+inline yield_awaiter yield() {
+    auto* w = current_worker();
+    return { w ? w->default_queue_idx() : 0 };
+}
+
 }  // namespace storage::runtime

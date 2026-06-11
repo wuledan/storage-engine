@@ -84,6 +84,8 @@ public:
     size_t idx_affine_{0};
     size_t idx_timer_{0};
 
+    size_t default_queue_idx() const noexcept override { return idx_engine_; }
+
     std::unique_ptr<io::IIOBackend> io_backend_;
 
 private:
