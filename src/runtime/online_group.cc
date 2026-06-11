@@ -115,6 +115,7 @@ void OnlineWorkerGroup::discover_topology() {
             // Track in per-NUMA lists
             numa_worker_lists_[n].push_back(worker.get());
             
+            worker_ranks_[worker.get()] = global_id;
             workers_.push_back(std::move(worker));
             ++global_id;
         }
@@ -139,6 +140,7 @@ OnlineWorkerGroup::OnlineWorkerGroup(const Config& cfg)
             if (cfg_.register_global) {
                 WorkerRegistry::instance().register_worker(worker.get(), i, 0);
             }
+            worker_ranks_[worker.get()] = i;
             workers_.push_back(std::move(worker));
         }
     }
@@ -205,6 +207,14 @@ OnlineGroupStats OnlineWorkerGroup::stats() const {
         s.total_exec_ns += ws.total_exec_ns;
     }
     return s;
+}
+
+size_t OnlineWorkerGroup::rank(const OnlineWorker& w) const noexcept {
+    auto it = worker_ranks_.find(&w);
+    if (it != worker_ranks_.end()) {
+        return it->second;
+    }
+    return SIZE_MAX;
 }
 
 }  // namespace storage::runtime

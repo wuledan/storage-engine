@@ -10,7 +10,7 @@ public:
     RingWorkQueue(QueueType type, Priority prio, std::string name, size_t cap = 4096)
         : type_(type), priority_(prio), name_(std::move(name)), ring_(cap) {}
 
-    void enqueue(WorkItem item) noexcept { ring_.enqueue(item); }
+    void enqueue(WorkItem item) noexcept override { ring_.enqueue(item); }
     bool try_dequeue(WorkItem& item) noexcept override { return ring_.dequeue(item); }
     size_t try_dequeue_batch(WorkItem* items, size_t max) noexcept override {
         return ring_.dequeue_bulk(items, max);

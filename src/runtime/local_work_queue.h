@@ -11,6 +11,11 @@ public:
                             size_t capacity = 1024);
 
     bool try_enqueue(WorkItem item) noexcept;
+
+    void enqueue(WorkItem item) noexcept override {
+        try_enqueue(std::move(item));
+    }
+
     bool try_dequeue(WorkItem& item) noexcept override;
     size_t try_dequeue_batch(WorkItem* items, size_t max_count) noexcept override;
     size_t approx_count() const noexcept override;

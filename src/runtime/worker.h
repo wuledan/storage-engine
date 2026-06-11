@@ -15,6 +15,12 @@
 
 namespace storage::runtime {
 
+class Worker;
+class OnlineWorker;
+
+Worker* current_worker();
+OnlineWorker* current_online_worker();
+
 struct WorkerStats {
     uint64_t tasks_executed{0};
     uint64_t total_exec_ns{0};

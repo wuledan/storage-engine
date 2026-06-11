@@ -1,4 +1,5 @@
 #include "worker.h"
+#include "online_worker.h"
 #include "policy_factory.h"
 #include "adapt/affinity_baton.h"
 #include <hwloc.h>
@@ -7,6 +8,7 @@ namespace storage::runtime {
 
 namespace {
 thread_local size_t tls_worker_id = SIZE_MAX;
+thread_local Worker* tls_current_worker = nullptr;
 
 // Default worker-id resolver (returns "no affinity")
 size_t default_worker_id() { return SIZE_MAX; }
@@ -210,11 +212,18 @@ WorkerStats Worker::stats() const {
 
 void Worker::worker_loop() {
     tls_worker_id = id_;
+    tls_current_worker = this;
     adapt::detail::get_current_worker_id = []() -> size_t { return tls_worker_id; };
     on_worker_start();
     scheduler_.run();
+    tls_current_worker = nullptr;
     tls_worker_id = SIZE_MAX;
     adapt::detail::get_current_worker_id = []() -> size_t { return SIZE_MAX; };
+}
+
+Worker* current_worker() { return tls_current_worker; }
+OnlineWorker* current_online_worker() {
+    return dynamic_cast<OnlineWorker*>(tls_current_worker);
 }
 
 }  // namespace storage::runtime

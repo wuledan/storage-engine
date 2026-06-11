@@ -13,6 +13,11 @@ public:
     // 生产者（IO Poller 线程调用）
     void push_batch(const WorkItem* items, size_t count) noexcept;
 
+    // 单元素入队（通过 push_batch 实现）
+    void enqueue(WorkItem item) noexcept override {
+        push_batch(&item, 1);
+    }
+
     // 消费者（Worker 线程调用）
     bool try_dequeue(WorkItem& item) noexcept override;        // 从本地缓存取
     size_t try_dequeue_batch(WorkItem* items, size_t max) noexcept override;

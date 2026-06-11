@@ -1,0 +1,5 @@
+if(EXISTS "/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_trace_config[1]_tests.cmake")
+  include("/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_trace_config[1]_tests.cmake")
+else()
+  add_test(test_trace_config_NOT_BUILT test_trace_config_NOT_BUILT)
+endif()

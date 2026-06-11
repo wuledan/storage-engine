@@ -57,6 +57,46 @@ reap_io::await_suspend():
 
 ---
 
+## 1.1 IO 收割协程 (P1 Poller)
+
+### 生命周期
+```
+init_io_backend() → 创建 io_poll_coro_fn(worker) → 立即执行
+  → flush_pending + flush_submissions + poll CQEs
+  → co_await yield_to(QueueType::kDiskIO)  ← 挂起到 P1 队列
+  → Scheduler 下一轮 drain disk_io → resume
+  → 无限循环
+```
+
+- **常驻**：从 init_io_backend 启动后永不退出
+- **单实例**：每个 OnlineWorker 恰好一个 P1 poller 协程
+- **所在队列**：P1 (disk_io, Priority::kHigh)
+
+### Scheduler 处理顺序 (run_busy)
+
+```
+drain_p0 (baton.post → 生产者恢复)         ← P0, 最先
+drain disk_io (P1 IO 收割协程 peek CQE)     ← P1, 先收割再接收新请求
+drain engine (P2 业务协程入口)              ← P2, 新请求排在收割后
+drain net_io (P1 网络 IO)                  ← P1, 同级
+drain timer  (P4 定时器)                   ← P4, 最后
+```
+
+> **原则**：先提交的先收割。IO poller 在 engine 之前执行，保证上一轮提交的 IO 结果先被收割，生产者尽快恢复，降低端到端延迟。
+
+### yield_to 原语
+
+```
+co_await yield_to(queue_idx)
+  → await_suspend: WorkItem::make_coro(handle) → queue->enqueue(item)
+  → 纯用户态操作，零 syscall，零 notify()
+  → Scheduler drain 该队列时 handle.resume()
+```
+
+支持任意队列：`yield_to(QueueType::kDiskIO)`, `yield_to(QueueType::kEngine)`, 等。
+
+---
+
 ## 2. io_uring 配置
 
 ```cpp

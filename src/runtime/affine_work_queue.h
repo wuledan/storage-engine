@@ -11,7 +11,7 @@ public:
                              size_t capacity = 8192);
 
     // 任意线程调用
-    void enqueue(WorkItem item) noexcept;
+    void enqueue(WorkItem item) noexcept override;
 
     // Worker 线程调用
     bool try_dequeue(WorkItem& item) noexcept override;

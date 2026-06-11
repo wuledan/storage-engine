@@ -16,5 +16,17 @@ add_library(runtime STATIC ${RUNTIME_SOURCES})
 target_include_directories(runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/..")
 find_library(LIBURING uring)
 find_library(LIBAIO aio)
-target_link_libraries(runtime PUBLIC Folly::folly Hwloc::hwloc Threads::Threads event ${LIBURING} ${LIBAIO})
+# ── SPDK for runtime (same conditional detection) ──
+set(SPDK_LIBS "")
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(SPDK spdk QUIET)
+endif()
+if(SPDK_FOUND)
+    set(SPDK_LIBS ${SPDK_LIBRARIES})
+endif()
+
+target_link_libraries(runtime PUBLIC
+    Folly::folly Hwloc::hwloc Threads::Threads event
+    ${LIBURING} ${LIBAIO} ${SPDK_LIBS})
 sanitizer_add(runtime)

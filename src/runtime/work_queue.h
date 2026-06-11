@@ -11,6 +11,9 @@ class WorkQueue {
 public:
     virtual ~WorkQueue() = default;
 
+    // 非阻塞 enqueue 单个任务
+    virtual void enqueue(WorkItem item) noexcept = 0;
+
     // 非阻塞 dequeue 单个任务
     virtual bool try_dequeue(WorkItem& item) noexcept = 0;
 

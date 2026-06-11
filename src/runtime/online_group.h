@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <unordered_map>
 
 namespace storage::runtime {
 
@@ -63,6 +64,9 @@ public:
 
     OnlineGroupStats stats() const;
 
+    // 返回 worker 在组内的排名（索引），用于负载均衡等场景
+    size_t rank(const OnlineWorker& w) const noexcept;
+
 private:
     void discover_topology();
 
@@ -70,6 +74,7 @@ private:
     Config cfg_;
     std::vector<std::vector<OnlineWorker*>> numa_worker_lists_;  // per-NUMA worker pointers
     std::vector<size_t> numa_worker_ranges_;  // per-NUMA: start index in workers_
+    std::unordered_map<const OnlineWorker*, size_t> worker_ranks_;  // worker → index
 };
 
 }  // namespace storage::runtime

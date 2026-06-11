@@ -1,0 +1,5 @@
+if(EXISTS "/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_io_backends[1]_tests.cmake")
+  include("/home/wuledan/work/proj/storage-engine/build_debug/tests/unit/test_io_backends[1]_tests.cmake")
+else()
+  add_test(test_io_backends_NOT_BUILT test_io_backends_NOT_BUILT)
+endif()

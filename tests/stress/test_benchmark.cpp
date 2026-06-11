@@ -164,7 +164,7 @@ static void bench_producer() {
 // ===== CoroutinePipeline: 单协程 batch 模式 =====
 TEST(BenchmarkIO, CoroutinePipeline) {
     std::vector<int> qds = {1, 4, 8, 16, 32, 64, 128, 256};
-    for (const auto& type : {"io_uring", "libaio"}) {
+    for (const auto& type : {"io_uring", "libaio", "spdk"}) {
         Worker::Config cfg; cfg.cpu_id = 1;
         OnlineWorker w(cfg);
         IOBackendConfig io_cfg; io_cfg.type = type; io_cfg.queue_depth = 256;
