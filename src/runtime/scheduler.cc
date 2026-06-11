@@ -9,6 +9,9 @@ static uint64_t now_ns() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+thread_local size_t tls_source_queue_idx = SIZE_MAX;
+thread_local WorkQueue* tls_source_queue = nullptr;
+
 Scheduler::Scheduler(SchedulingPolicy* policy, AdaptiveIdle* idle)
     : policy_(policy), idle_(idle) {}
 
@@ -35,6 +38,8 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
         if (n == 0) break;
         last_poll_times_[affine_idx_] = now_ns();
         for (size_t i = 0; i < n; ++i) {
+            tls_source_queue_idx = affine_idx_;
+            tls_source_queue = q.get();
             if (batch[i].tag == 1) {
                 batch[i].execute();
             } else {
@@ -67,23 +72,10 @@ void Scheduler::run() {
 
     while (running_.load(std::memory_order_acquire)) {
         uint64_t t_iter = __builtin_ia32_rdtsc();
-        uint64_t t0 = t_iter;
 
-        // P0: baton.post activated producers + P1: disk_io coroutine (inline IO poll)
-        if (io_backend_) {
-            io_backend_->flush_pending();
-            io_backend_->flush_submissions();
-            storage::io::IOCompletion io_comps[64];
-            while (true) {
-                size_t io_n = io_backend_->poll(io_comps, 64);
-                if (io_n == 0) break;
-                for (size_t j = 0; j < io_n; ++j)
-                    if (io_comps[j].callback) io_comps[j].callback(io_comps[j]);
-            }
-        }
-        uint64_t t1 = __builtin_ia32_rdtsc();
+        // P0: baton.post activated producers
         drain_p0(batch, kMaxBatchSize);
-        uint64_t t2 = __builtin_ia32_rdtsc();
+        uint64_t t1 = __builtin_ia32_rdtsc();
 
         // ── Step 2: 快照 + 策略决策 ──
         snapshots.clear();
@@ -140,10 +132,10 @@ void Scheduler::run() {
         drain_p0(batch, kMaxBatchSize);
         uint64_t t5 = __builtin_ia32_rdtsc();
 
-        // 累计探针
-        probe.io_poll     += t1 - t0;
-        probe.drain_p0    += t2 - t1;
-        probe.snapshot    += t4 - t2;
+        // 累计探针 (no inline IO poll — handled by coroutine via P1 drain)
+        probe.io_poll     += 0;
+        probe.drain_p0    += t1 - t_iter;
+        probe.snapshot    += t4 - t1;
         probe.drain_p0b   += t5 - t4;
         probe.iter        += t5 - t_iter;
         probe_count++;
@@ -173,22 +165,30 @@ void Scheduler::run_busy() {
         drain_p0(batch, kMaxBatchSize);
         uint64_t t1 = __builtin_ia32_rdtsc();
 
-        // P1: disk IO coroutine FIRST (poll CQEs, fire callbacks)
+        // P1: disk IO coroutine (poll CQEs, fire callbacks, then re-enqueue)
         if (disk_io_idx_ < queues_.size()) {
             size_t n = queues_[disk_io_idx_]->try_dequeue_batch(batch.data(), kMaxBatchSize);
-            for (size_t i = 0; i < n; ++i)
+            for (size_t i = 0; i < n; ++i) {
+                tls_source_queue_idx = disk_io_idx_;
+                tls_source_queue = queues_[disk_io_idx_].get();
                 batch[i].execute();
+            }
         }
         // Then: engine, net_io, timer (everything else)
         for (size_t qi = 0; qi < queues_.size(); ++qi) {
             if (qi == affine_idx_ || qi == disk_io_idx_) continue;
             size_t n = queues_[qi]->try_dequeue_batch(batch.data(), kMaxBatchSize);
             if (n == 0) continue;
-            for (size_t i = 0; i < n; ++i)
+            auto* qp = queues_[qi].get();
+            for (size_t i = 0; i < n; ++i) {
+                tls_source_queue_idx = qi;
+                tls_source_queue = qp;
                 batch[i].execute();
+            }
         }
         uint64_t t2 = __builtin_ia32_rdtsc();
 
+        probe.io_poll    += t1 - t_iter;
         probe.drain_p0   += t1 - t_iter;
         probe.drain_p0b  += t2 - t1;
         probe.iter       += t2 - t_iter;

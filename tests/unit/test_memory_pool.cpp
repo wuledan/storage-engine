@@ -3,8 +3,8 @@
 #include <chrono>
 #include "runtime/worker.h"
 #include "runtime/online_worker.h"
-#include "runtime/adapt/object_pool.h"
-#include "runtime/adapt/memory_pool.h"
+#include "runtime/object_pool.h"
+#include "runtime/memory_pool.h"
 
 using namespace storage::runtime;
 using namespace storage::runtime::adapt;

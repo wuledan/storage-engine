@@ -20,11 +20,9 @@
 
 #include "affinity_baton.h"
 
-// Forward-declare folly::coro::Task for co_scoped_lock() return type.
-// Full definition is in <folly/coro/Task.h>, included via coroutine.h in the .cc.
-namespace folly::coro { template<typename T> class Task; }
-
 namespace storage::runtime::adapt {
+
+struct ScopedLockAwaiter;
 
 // ── AffinityMutex ──
 //
@@ -139,6 +137,15 @@ public:
         return LockAwaiter{*this, Waiter{}};
     }
 
+    // ── Non-coroutine (blocking) lock — enables std::lock_guard / std::unique_lock ──
+    void lock() noexcept {
+        while (!try_lock()) {
+            while (state_.load(std::memory_order_relaxed) & kLockedFlag) {
+                __builtin_ia32_pause();
+            }
+        }
+    }
+
     // ── RAII lock guard ──
 
     class AffinityMutexLock {
@@ -175,9 +182,9 @@ public:
         AffinityMutex* mutex_;
     };
 
-    // ── co_scoped_lock(): acquire and return RAII guard ──
-    // Defined in affinity_mutex.cc (needs folly::coro::Task full definition)
-    folly::coro::Task<AffinityMutexLock> co_scoped_lock();
+    // ── co_scoped_lock(): acquire and return RAII guard via co_await ──
+    // Usage: auto guard = co_await mutex.co_scoped_lock();
+    ScopedLockAwaiter co_scoped_lock() noexcept;
 
     // ── try_lock(): non-blocking try ──
 
@@ -214,5 +221,49 @@ private:
 
     RouteFunc route_;  // 路由回调，unlock() 中唤醒 waiter 时使用
 };
+
+// ── Scoped RAII guard ──
+// Works with both blocking lock/unlock and co_await co_scoped_lock().
+// Movable, default-constructible (null mutex).
+struct AffinityScopedLock {
+    AffinityMutex* mtx{nullptr};
+
+    AffinityScopedLock() = default;
+    explicit AffinityScopedLock(AffinityMutex& m) noexcept : mtx(&m) {}
+
+    AffinityScopedLock(AffinityScopedLock&& other) noexcept : mtx(other.mtx) {
+        other.mtx = nullptr;
+    }
+    AffinityScopedLock& operator=(AffinityScopedLock&& other) noexcept {
+        if (mtx) mtx->unlock();
+        mtx = other.mtx;
+        other.mtx = nullptr;
+        return *this;
+    }
+    AffinityScopedLock(const AffinityScopedLock&) = delete;
+
+    ~AffinityScopedLock() {
+        if (mtx) mtx->unlock();
+    }
+
+    void unlock() noexcept {
+        if (mtx) { mtx->unlock(); mtx = nullptr; }
+    }
+};
+
+// ── Awaiter for co_await mutex.co_scoped_lock() ──
+struct ScopedLockAwaiter {
+    AffinityMutex& mtx;
+    AffinityMutex::LockAwaiter inner;
+
+    bool await_ready() const noexcept { return inner.await_ready(); }
+    void await_suspend(std::coroutine_handle<> h) noexcept { inner.await_suspend(h); }
+    AffinityScopedLock await_resume() noexcept { return AffinityScopedLock(mtx); }
+};
+
+// Out-of-line definition of co_scoped_lock() (needs ScopedLockAwaiter complete)
+inline ScopedLockAwaiter AffinityMutex::co_scoped_lock() noexcept {
+    return {*this, {*this, {}}};
+}
 
 }  // namespace storage::runtime::adapt

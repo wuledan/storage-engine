@@ -1,7 +1,7 @@
 #include "worker.h"
 #include "online_worker.h"
 #include "policy_factory.h"
-#include "adapt/affinity_baton.h"
+#include "affinity_baton.h"
 #include <hwloc.h>
 
 namespace storage::runtime {
@@ -14,7 +14,7 @@ thread_local Worker* tls_current_worker = nullptr;
 size_t default_worker_id() { return SIZE_MAX; }
 }
 
-// Define the function pointer declared in adapt/affinity_baton.h.
+// Define the function pointer declared in affinity_baton.h.
 // adapt/*.cc files are excluded from this build, so we provide the
 // definition here instead.
 namespace adapt::detail {
@@ -24,7 +24,7 @@ namespace adapt::detail {
 // ── AffinityBaton method implementations ──
 // adapt/*.cc files are excluded from the build, so we also provide
 // the AffinityBaton method bodies here (they would normally live in
-// adapt/affinity_baton.cc, which includes a quant_invest header).
+// the dead affinity_baton.cc, which included a quant_invest header).
 namespace adapt {
 
 size_t AffinityBaton::current_worker_id() {
@@ -62,16 +62,10 @@ void AffinityBaton::resume_chain(WaiterNode* waiters, RouteFunc* route) {
 }
 
 // ── AffinityMutex method implementations ──
-// adapt/affinity_mutex.cc is excluded (needs quant_invest headers),
+// The dead affinity_mutex.cc was excluded (needed quant_invest headers),
 // so we provide the bodies here.
 size_t AffinityMutex::current_worker_id() {
     return detail::get_current_worker_id();
-}
-
-folly::coro::Task<AffinityMutex::AffinityMutexLock>
-AffinityMutex::co_scoped_lock() {
-    co_await co_lock();
-    co_return AffinityMutexLock{*this};
 }
 
 void AffinityMutex::unlock() {

@@ -5,7 +5,7 @@
 #include <folly/coro/Task.h>
 #include <folly/coro/BlockingWait.h>
 #include "runtime/online_worker.h"
-#include "runtime/adapt/affinity_baton.h"
+#include "runtime/affinity_baton.h"
 
 using namespace storage::runtime;
 

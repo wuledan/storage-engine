@@ -1,5 +1,6 @@
 #include "offline_group.h"
-#include "adapt/work_stealing_executor.h"
+// work_stealing_executor.h has been removed (dead code)
+// #include "adapt/work_stealing_executor.h"
 #include "work_item.h"
 
 namespace storage::runtime {

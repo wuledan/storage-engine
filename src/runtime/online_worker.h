@@ -7,8 +7,10 @@
 #include "io/io_backend.h"
 #include "io/io_engine.h"
 #include <functional>
+#include <optional>
+#include <type_traits>
 #include <folly/coro/Task.h>
-#include "adapt/affinity_baton.h"
+#include "affinity_baton.h"
 
 namespace storage::runtime {
 
@@ -26,6 +28,16 @@ public:
     void submit_engine(WorkItem item);
     void submit_net_io(WorkItem item);
     void submit_disk_io(WorkItem item);
+
+    // Submit a callable and get a Task that completes with the result.
+    // Usage:
+    //   auto result = co_await worker.co_submit<int>([] { return 42; });
+    //   auto task = worker.co_submit<void>([] { do_work(); });
+    //
+    // The callable runs on the worker's thread.  The caller's coroutine
+    // suspends until the callable completes, then resumes with the result.
+    template <typename R, typename F>
+    folly::coro::Task<R> co_submit(F&& func);
 
     // 向 affine queue 投递协程句柄
     void enqueue_affine(std::coroutine_handle<> h) override;
@@ -91,5 +103,100 @@ public:
 private:
     TaskDispatchMode dispatch_mode_{TaskDispatchMode::kDirect};
 };
+
+// ============================================================================
+// Template implementation: co_submit
+// ============================================================================
+// Must be in the header because it's a template.  We use VoidTag as a
+// placeholder for void returns — std::optional<void> is ill-formed.
+//
+// Design: wraps the user's callable in a coroutine with
+//   initial_suspend = always  → doesn't start until the scheduler resumes it
+//   final_suspend   = never   → coroutine frame is destroyed after body runs
+//
+// The user's callable, state, and route are passed as *function parameters*
+// to a generic lambda (no captures).  Coroutine function parameters live in
+// the coroutine frame, so they survive suspends — unlike lambda captures
+// which would dangle once the closure goes out of scope.
+//
+template <typename R, typename F>
+folly::coro::Task<R> OnlineWorker::co_submit(F&& func) {
+    struct VoidTag {};
+    using ResultType = std::conditional_t<std::is_void_v<R>, VoidTag, R>;
+
+    struct SharedState {
+        std::optional<ResultType> result;
+        std::exception_ptr exception;
+        adapt::AffinityBaton baton;
+    };
+
+    auto state = std::make_shared<SharedState>();
+    auto route = make_route_func();
+
+    // ── Engine-work coroutine type ──
+    //   initial_suspend = always  : submitted via handle to engine queue
+    //   final_suspend   = never   : frame auto-destroyed after co_return;
+    //                               the handle is valid only while the
+    //                               coroutine body runs (inside execute()),
+    //                               and the queue does not need it afterwards.
+    struct EngineWork {
+        struct promise_type {
+            EngineWork get_return_object() {
+                return EngineWork{
+                    std::coroutine_handle<promise_type>::from_promise(*this)};
+            }
+            std::suspend_always initial_suspend() noexcept { return {}; }
+            std::suspend_never  final_suspend()   noexcept { return {}; }
+            void return_void()   noexcept {}
+            void unhandled_exception() noexcept { std::terminate(); }
+        };
+        std::coroutine_handle<promise_type> handle;
+    };
+
+    // Generic lambda (no captures) — the callable, state, and route are
+    // stored as coroutine function parameters in the coroutine frame.
+    // This avoids the dangling-capture problem.
+    auto make_engine_work = [](auto callable,
+                               std::shared_ptr<SharedState> st,
+                               adapt::RouteFunc rt) -> EngineWork {
+        try {
+            if constexpr (std::is_void_v<R>) {
+                callable();
+                st->result.emplace(VoidTag{});
+            } else {
+                st->result.emplace(callable());
+            }
+        } catch (...) {
+            st->exception = std::current_exception();
+        }
+        st->baton.post(rt);
+        co_return;
+    };
+
+    // Build the coroutine — body does NOT run yet (initial_suspend == always).
+    // Pass copies so the shared state / route survive for the co_submit body.
+    EngineWork ew = make_engine_work(
+        std::forward<F>(func), state, route);
+
+    // Submit the handle to the engine queue.
+    submit_engine(WorkItem::make_coro(ew.handle));
+
+    // Release ownership — the queue now "owns" the handle; final_suspend /
+    // never will auto-destroy the frame after the body runs.
+    ew.handle = {};
+
+    // Wait for completion.
+    co_await state->baton;
+
+    if (state->exception) {
+        std::rethrow_exception(state->exception);
+    }
+
+    if constexpr (std::is_void_v<R>) {
+        co_return;
+    } else {
+        co_return std::move(*state->result);
+    }
+}
 
 }  // namespace storage::runtime

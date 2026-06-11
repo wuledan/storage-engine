@@ -13,6 +13,17 @@
 
 namespace storage::runtime {
 
+// Thread-local: set by Scheduler before each coroutine/func execution
+// to indicate which queue the current work item was dequeued from.
+// Used by yield() to route the coroutine back to its source queue.
+// Consumer: yield_awaiter in yield_awaiter.h
+extern thread_local size_t tls_source_queue_idx;
+
+// Thread-local pointer to the source WorkQueue, set alongside the index
+// above.  Provides a direct queue pointer for yield_awaiter::await_suspend
+// when current_worker() is not available (e.g. during initialization).
+extern thread_local WorkQueue* tls_source_queue;
+
 class Scheduler {
 public:
     Scheduler(SchedulingPolicy* policy, AdaptiveIdle* idle);

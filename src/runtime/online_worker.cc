@@ -27,8 +27,9 @@ struct IOCoroTask {
 };
 
 // ── Persistent IO poll coroutine ──
-// Suspends via co_await yield_to(idx_disk_io_) — re-enqueues handle to P1.
-// Scheduler resumes via drain_all → P1 dequeue → handle.resume().
+// Suspends via yield() which routes back to disk_io (P1) because
+// tls_source_queue_idx is set by init_io_backend() before creation.
+// Scheduler resumes via P1 dequeue → handle.resume().
 static IOCoroTask io_poll_coro_fn(OnlineWorker* w) {
     io::IOCompletion io_comps[64];
     while (true) {
@@ -44,8 +45,9 @@ static IOCoroTask io_poll_coro_fn(OnlineWorker* w) {
             }
         }
 
-        // Suspend: handle re-enqueued to P1, Scheduler will resume us
-        co_await yield_to(w->idx_disk_io_);
+        // yield() re-enqueues to disk_io (P1) because tls_source_queue_idx
+        // was set to idx_disk_io_ by init_io_backend() before creation.
+        co_await yield();
     }
 }
 
@@ -115,8 +117,15 @@ void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     io_backend_ = io::IOEngine::create(cfg, make_route_func());
     scheduler().set_io_backend(io_backend_.get());
 
-    // Launch persistent IO poll coroutine in P1 (disk_io) queue
+    // Set tls_source_queue_idx + tls_source_queue so yield() inside
+    // io_poll_coro_fn routes back to disk_io (P1) — avoids any
+    // current_worker() dependency since this runs on the test/main thread
+    // before the worker loop starts.
+    tls_source_queue_idx = idx_disk_io_;
+    tls_source_queue = get_queue(idx_disk_io_);
     auto io_coro = io_poll_coro_fn(this);
+    tls_source_queue_idx = SIZE_MAX;  // reset
+    tls_source_queue = nullptr;
     (void)io_coro;
 }
 

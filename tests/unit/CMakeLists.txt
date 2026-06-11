@@ -52,6 +52,7 @@ add_runtime_test(test_runtime           test_runtime.cpp)
 
 add_runtime_test(test_coroutine_worker  test_coroutine_worker.cpp)
 add_runtime_test(test_affinity_routing  test_affinity_routing.cpp)
+add_runtime_test(test_affinity_semaphore  test_affinity_semaphore.cpp)
 
 add_runtime_test(test_memory_pool        test_memory_pool.cpp)
 
@@ -61,9 +62,13 @@ add_runtime_test(test_trace_config       test_trace_config.cpp)
 
 add_runtime_test(test_decision_system     test_decision_system.cpp)
 
+add_runtime_test(test_mutex_guard         test_mutex_guard.cpp)
+
 add_runtime_test(test_executor            test_executor.cpp)
 
 add_runtime_test(test_feedback_loop       test_feedback_loop.cpp)
+
+add_runtime_test(test_co_submit           test_co_submit.cpp)
 
 # IO types test (links io library + runtime)
 add_executable(test_io_types test_io_types.cpp)

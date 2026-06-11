@@ -9,9 +9,7 @@
 #include <new>
 
 #include "affinity_mutex.h"
-#include <folly/coro/BlockingWait.h>
-
-using folly::coro::blockingWait;
+#include <mutex>
 
 namespace storage::runtime::adapt {
 
@@ -75,7 +73,7 @@ private:
 class CentralFreeList {
 public:
     void push(void* ptr, size_t size) {
-        auto lock = blockingWait(mutex_.co_scoped_lock());
+        std::lock_guard<AffinityMutex> lock(mutex_);
         auto* node = static_cast<FreeNode*>(ptr);
         node->size = size;
         node->next = head_;
@@ -83,7 +81,7 @@ public:
     }
 
     void* pop(size_t min_size) {
-        auto lock = blockingWait(mutex_.co_scoped_lock());
+        std::lock_guard<AffinityMutex> lock(mutex_);
         FreeNode** prev = &head_;
         FreeNode* curr = head_;
         while (curr) {
@@ -194,7 +192,7 @@ public:
 
             // Cache miss — try central free list
             {
-                auto lock = blockingWait(class_mutexes_[class_idx].co_scoped_lock());
+                std::lock_guard<AffinityMutex> lock(class_mutexes_[class_idx]);
                 ptr = small_free_lists_[class_idx]->pop();
             }
             if (ptr) {

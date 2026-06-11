@@ -4,8 +4,8 @@
 #include "scheduling_policy.h"
 #include "policy_factory.h"
 #include "worker_perf.h"
-#include "adapt/object_pool.h"
-#include "adapt/memory_pool.h"
+#include "object_pool.h"
+#include "memory_pool.h"
 #include <folly/Executor.h>
 #include <atomic>
 #include <memory>

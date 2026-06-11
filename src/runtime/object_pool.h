@@ -9,10 +9,7 @@
 #include <vector>
 
 #include "affinity_mutex.h"
-#include <folly/coro/BlockingWait.h>
-
-// Bring blockingWait into scope (used unqualified in template code below)
-using folly::coro::blockingWait;
+#include <mutex>
 
 namespace storage::runtime::adapt {
 
@@ -51,7 +48,7 @@ public:
 
     // ── Acquire an object ──
     std::shared_ptr<T> acquire() {
-        auto lock = blockingWait(impl_->mutex_.co_scoped_lock());
+        std::lock_guard<AffinityMutex> lock(impl_->mutex_);
 
         // Check if we need to grow
         if (impl_->free_list_.empty()) {
@@ -109,7 +106,7 @@ public:
 
     // ── Warmup ──
     void warmup(size_t count) {
-        auto lock = blockingWait(impl_->mutex_.co_scoped_lock());
+        std::lock_guard<AffinityMutex> lock(impl_->mutex_);
         impl_->grow(count);
     }
 
@@ -124,7 +121,7 @@ public:
     };
 
     Stats stats() const noexcept {
-        auto lock = blockingWait(impl_->mutex_.co_scoped_lock());
+        std::lock_guard<AffinityMutex> lock(impl_->mutex_);
         Stats s;
         s.total_allocated = impl_->capacity_;
         s.total_in_use = impl_->in_use_.load(std::memory_order_relaxed);
@@ -159,7 +156,7 @@ private:
 
         // Return object to pool (called by shared_ptr deleter)
         void return_object(size_t idx) {
-            auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
+            std::lock_guard<AffinityMutex> lock(mutex_);
             free_list_.push_back(idx);
             in_use_.fetch_sub(1, std::memory_order_relaxed);
             stats_.release_count.fetch_add(1, std::memory_order_relaxed);

@@ -7,7 +7,7 @@
 #include "runtime/online_worker.h"
 #include "runtime/affine_work_queue.h"
 #include "runtime/local_work_queue.h"
-#include "runtime/adapt/affinity_baton.h"
+#include "runtime/affinity_baton.h"
 
 using namespace storage::runtime;
 

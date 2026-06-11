@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "runtime/online_worker.h"
-#include "runtime/adapt/affinity_baton.h"
+#include "runtime/affinity_baton.h"
 #include "io/io_engine.h"
 #include "io/io_uring_backend.h"
 #include <thread>

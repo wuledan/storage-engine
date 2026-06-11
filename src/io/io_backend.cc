@@ -1,5 +1,5 @@
 #include "io_backend.h"
-#include "runtime/adapt/affinity_baton.h"
+#include "runtime/affinity_baton.h"
 #include <memory>
 
 namespace storage::io {
