@@ -134,6 +134,8 @@ WorkStealingExecutor::WorkStealingExecutor(const Config& cfg) : cfg_(cfg) {
             }
 
             ws->local_deque = std::make_unique<WorkStealingDeque>();
+            ws->yield_queue = std::make_unique<LocalWorkQueue>(
+                QueueType::kEngine, Priority::kMedium, "wse_yield");
             ws->running.store(false, std::memory_order_relaxed);
             ws->has_work.store(false, std::memory_order_relaxed);
 
@@ -241,8 +243,19 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
     while (ws.running.load(std::memory_order_acquire)) {
         WorkItem item;
 
+        // 0. Drain yield queue (coroutines that yielded back to this worker)
+        if (ws.yield_queue->try_dequeue(item)) {
+            tls_source_queue = ws.yield_queue.get();
+            tls_source_queue_idx = SIZE_MAX;  // tell yield() to use tls_source_queue
+            item.execute();
+            ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
         // 1. Pop from own local deque (LIFO — best cache locality)
         if (ws.local_deque->pop(item)) {
+            tls_source_queue = ws.yield_queue.get();
+            tls_source_queue_idx = SIZE_MAX;
             item.execute();
             ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
             continue;
@@ -254,6 +267,8 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
         {
             std::lock_guard<std::mutex> lock(global_mutex_);
             if (global_queue_->try_dequeue(item)) {
+                tls_source_queue = ws.yield_queue.get();
+                tls_source_queue_idx = SIZE_MAX;
                 item.execute();
                 ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
                 continue;
@@ -271,6 +286,8 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
                 size_t victim_idx = peers[(start_idx + i) % peers.size()];
                 auto& victim = *workers_[victim_idx];
                 if (victim.local_deque->steal(item)) {
+                    tls_source_queue = ws.yield_queue.get();
+                    tls_source_queue_idx = SIZE_MAX;
                     item.execute();
                     ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
                     ws.steals_success.fetch_add(1, std::memory_order_relaxed);

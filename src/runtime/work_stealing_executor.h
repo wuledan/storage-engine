@@ -3,6 +3,7 @@
 #include "work_stealing_deque.h"
 #include "adaptive_idle.h"
 #include "ring_work_queue.h"
+#include "local_work_queue.h"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -32,6 +33,7 @@ public:
 
         // Work queues
         std::unique_ptr<WorkStealingDeque> local_deque;  // owner LIFO pop, thief FIFO steal
+        std::unique_ptr<LocalWorkQueue> yield_queue;     // yield() target for this worker
 
         // Thread + coordination
         std::thread thread;

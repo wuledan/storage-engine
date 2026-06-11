@@ -56,6 +56,9 @@ public:
     bool try_acquire() noexcept;
     void release() noexcept;
 
+    // Set route callback for thread-affine wakeup (required for offline mode).
+    void set_route(RouteFunc route) noexcept { route_ = std::move(route); }
+
     size_t available() const noexcept {
         return count_.load(std::memory_order_acquire);
     }
@@ -64,6 +67,11 @@ private:
     static size_t current_worker_id() noexcept {
         return detail::get_current_worker_id();
     }
+
+    // Route callback: if set, used in release() to route waiters back to
+    // their original worker thread instead of resuming inline. This is
+    // required for thread-affinity correctness in offline (multi-worker) mode.
+    RouteFunc route_;
 
     // Wait queue: linked list of WaiterNode, protected by single CAS
     std::atomic<AffinityBaton::WaiterNode*> waiters_{nullptr};
@@ -120,9 +128,14 @@ inline void AffinitySemaphore::release() noexcept {
     while (old) {
         if (waiters_.compare_exchange_weak(old, old->next,
                 std::memory_order_acquire, std::memory_order_relaxed)) {
-            // Resume the waiter inline, then free the heap-allocated node.
             auto* node = old;
-            node->handle.resume();
+            // If route is set and the waiter has a valid worker_id, route back
+            // to the original worker for thread-affine wakeup.
+            if (route_ && node->worker_id != SIZE_MAX) {
+                route_(node->worker_id, node->handle);
+            } else {
+                node->handle.resume();
+            }
             delete node;
             return;
         }
