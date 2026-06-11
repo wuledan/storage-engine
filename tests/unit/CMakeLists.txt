@@ -69,6 +69,7 @@ add_runtime_test(test_executor            test_executor.cpp)
 add_runtime_test(test_feedback_loop       test_feedback_loop.cpp)
 
 add_runtime_test(test_co_submit           test_co_submit.cpp)
+add_runtime_test(test_coro_api            test_coro_api.cpp)
 
 # Chase-Lev work-stealing deque (needs libatomic for 32-byte std::atomic<WorkItem>)
 add_executable(test_work_stealing_deque test_work_stealing_deque.cpp)
