@@ -990,3 +990,158 @@ TEST(CoroThread, ThisCoroGetIdInsideCoroutine) {
 
     worker_join(w);
 }
+
+// ============================================================================
+// when_all — spawn N tasks, wait for all, collect results
+// ============================================================================
+
+namespace {
+
+// Local coroutine type — initial_suspend = always so it can be
+// submitted to the engine queue, final_suspend = never for auto cleanup.
+struct WhenAllTestCoro {
+    struct promise_type {
+        WhenAllTestCoro get_return_object() {
+            return WhenAllTestCoro{
+                std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_never  final_suspend()   noexcept { return {}; }
+        void return_void()   noexcept {}
+        void unhandled_exception() noexcept { std::terminate(); }
+    };
+    std::coroutine_handle<promise_type> handle;
+};
+
+}  // namespace
+
+// ═══════════════════════════════════════════════════════════════
+// WhenAll tests
+//
+// These tests use run_busy() mode (busy_poll = true) so the engine
+// queue is drained every tick alongside the timer queue — the
+// persistent timer coroutine on P1 would otherwise starve P2.
+// The WhenAllTestCoro handle is submitted via submit_engine() and
+// the test spins on an atomic result.
+//
+// WhenAllOne   — single callable, single result
+// WhenAllTwo   — two callables, tuple of results
+// WhenAllThree — three callables, tuple of results
+// WhenAllEmpty — zero-arg sanity check (no worker needed)
+// ═══════════════════════════════════════════════════════════════
+
+TEST(CoroApi, WhenAllOne) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    auto* w = new OnlineWorker(cfg);
+    w->scheduler().set_busy_poll(true);
+    w->start();
+
+    std::atomic<int> result{0};
+
+    auto coro_fn = [&result]() -> WhenAllTestCoro {
+        auto [v] = co_await when_all([] { return 42; });
+        result.store(v, std::memory_order_release);
+        co_return;
+    };
+
+    WhenAllTestCoro wtc = coro_fn();
+    w->submit_engine(WorkItem::make_coro(wtc.handle));
+    wtc.handle = {};
+
+    int spins = 0;
+    while (result.load(std::memory_order_acquire) != 42 && spins < 2000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(result.load(), 42);
+
+    w->stop();
+    w->join();
+    delete w;
+}
+
+TEST(CoroApi, WhenAllTwo) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    auto* w = new OnlineWorker(cfg);
+    w->scheduler().set_busy_poll(true);
+    w->start();
+
+    std::atomic<int> sum{0};
+
+    auto coro_fn = [&sum]() -> WhenAllTestCoro {
+        auto [a, b] = co_await when_all(
+            [] { return 10; },
+            [] { return 32; }
+        );
+        sum.store(a + b, std::memory_order_release);
+        co_return;
+    };
+
+    WhenAllTestCoro wtc = coro_fn();
+    w->submit_engine(WorkItem::make_coro(wtc.handle));
+    wtc.handle = {};
+
+    int spins = 0;
+    while (sum.load(std::memory_order_acquire) != 42 && spins < 2000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(sum.load(), 42);
+
+    w->stop();
+    w->join();
+    delete w;
+}
+
+TEST(CoroApi, WhenAllThree) {
+    Worker::Config cfg;
+    cfg.cpu_id = 0;
+    auto* w = new OnlineWorker(cfg);
+    w->scheduler().set_busy_poll(true);
+    w->start();
+
+    std::atomic<int> result{0};
+
+    auto coro_fn = [&result]() -> WhenAllTestCoro {
+        auto [a, b, c] = co_await when_all(
+            [] { return 1; },
+            [] { return 2; },
+            [] { return 3; }
+        );
+        result.store(a + b + c, std::memory_order_release);
+        co_return;
+    };
+
+    WhenAllTestCoro wtc = coro_fn();
+    w->submit_engine(WorkItem::make_coro(wtc.handle));
+    wtc.handle = {};
+
+    int spins = 0;
+    while (result.load(std::memory_order_acquire) != 6 && spins < 2000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++spins;
+    }
+    EXPECT_EQ(result.load(), 6);
+
+    w->stop();
+    w->join();
+    delete w;
+}
+
+TEST(CoroApi, WhenAllEmpty) {
+    // when_all() with no arguments should return immediately
+    // and produce an empty tuple.
+    bool ok = false;
+    auto test_fn = [&]() -> folly::coro::Task<void> {
+        auto t = co_await when_all();
+        static_assert(std::tuple_size_v<decltype(t)> == 0,
+                      "empty when_all must produce empty tuple");
+        ok = true;
+    };
+    // blockingWait runs the coroutine on the calling thread.
+    // when_all(N=0) does not need a worker context (no tasks to spawn).
+    folly::coro::blockingWait(test_fn());
+    EXPECT_TRUE(ok);
+}

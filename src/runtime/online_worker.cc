@@ -44,8 +44,6 @@ static IOCoroTask io_poll_coro_fn(OnlineWorker* w) {
             }
         }
 
-        // yield() re-enqueues to disk_io (P1) because tls_source_queue_idx
-        // was set to idx_disk_io_ by init_io_backend() before creation.
         co_await yield();
     }
 }

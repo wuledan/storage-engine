@@ -156,34 +156,36 @@ void Scheduler::run_busy() {
     }
 
     constexpr size_t kMaxBatchSize = 64;
-    std::vector<WorkItem> batch(kMaxBatchSize);
+    std::vector<WorkItem> p0_batch(kMaxBatchSize);
 
     while (running_.load(std::memory_order_acquire)) {
         uint64_t t_iter = __builtin_ia32_rdtsc();
 
         // P0: baton.post activated producers (always first)
-        drain_p0(batch, kMaxBatchSize);
+        drain_p0(p0_batch, kMaxBatchSize);
         uint64_t t1 = __builtin_ia32_rdtsc();
 
         // P1: disk IO coroutine (poll CQEs, fire callbacks, then re-enqueue)
         if (disk_io_idx_ < queues_.size()) {
-            size_t n = queues_[disk_io_idx_]->try_dequeue_batch(batch.data(), kMaxBatchSize);
+            std::vector<WorkItem> io_batch(kMaxBatchSize);
+            size_t n = queues_[disk_io_idx_]->try_dequeue_batch(io_batch.data(), kMaxBatchSize);
             for (size_t i = 0; i < n; ++i) {
                 tls_source_queue_idx = disk_io_idx_;
                 tls_source_queue = queues_[disk_io_idx_].get();
-                batch[i].execute();
+                io_batch[i].execute();
             }
         }
         // Then: engine, net_io, timer (everything else)
+        std::vector<WorkItem> other_batch(kMaxBatchSize);
         for (size_t qi = 0; qi < queues_.size(); ++qi) {
             if (qi == affine_idx_ || qi == disk_io_idx_) continue;
-            size_t n = queues_[qi]->try_dequeue_batch(batch.data(), kMaxBatchSize);
+            size_t n = queues_[qi]->try_dequeue_batch(other_batch.data(), kMaxBatchSize);
             if (n == 0) continue;
             auto* qp = queues_[qi].get();
             for (size_t i = 0; i < n; ++i) {
                 tls_source_queue_idx = qi;
                 tls_source_queue = qp;
-                batch[i].execute();
+                other_batch[i].execute();
             }
         }
         uint64_t t2 = __builtin_ia32_rdtsc();
