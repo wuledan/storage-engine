@@ -1,8 +1,15 @@
 #include "scheduler.h"
+#include "metric_counter.h"
 #include <chrono>
 #include <algorithm>
 
 namespace storage::runtime {
+
+namespace {
+    metric::MetricCounter g_sched_iters;
+    metric::MetricCounter g_drain_p0_ns;
+    metric::MetricCounter g_drain_all_ns;
+}
 
 static uint64_t now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -195,6 +202,9 @@ void Scheduler::run_busy() {
         probe.drain_p0b  += t2 - t1;
         probe.iter       += t2 - t_iter;
         probe_count++;
+        g_sched_iters << 1;
+        g_drain_p0_ns << ((t1 - t_iter) / 3);   // rdtsc → ns (approx 3GHz)
+        g_drain_all_ns << ((t2 - t1) / 3);
 
         // Report one scheduling cycle timing
         if (probe_count == 50000) {
@@ -204,6 +214,13 @@ void Scheduler::run_busy() {
                    probe.iter / (double)probe_count / 3.0);
         }
     }
+}
+
+void register_scheduler_metrics() {
+    using namespace metric;
+    MetricRegistry::instance().register_counter("scheduler/iters", &g_sched_iters);
+    MetricRegistry::instance().register_counter("scheduler/drain_p0_ns", &g_drain_p0_ns);
+    MetricRegistry::instance().register_counter("scheduler/drain_all_ns", &g_drain_all_ns);
 }
 
 }  // namespace storage::runtime

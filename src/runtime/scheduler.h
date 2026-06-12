@@ -78,4 +78,6 @@ private:
     std::vector<uint64_t> total_dequeued_;
 };
 
+void register_scheduler_metrics();
+
 }  // namespace storage::runtime

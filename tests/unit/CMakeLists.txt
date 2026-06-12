@@ -77,6 +77,7 @@ add_runtime_test(test_timed_wait          test_timed_wait.cpp)
 add_runtime_test(test_metric_counter      test_metric_counter.cpp)
 add_runtime_test(test_metric_histogram    test_metric_histogram.cpp)
 add_runtime_test(test_metric_window       test_metric_window.cpp)
+add_runtime_test(test_metric_server       test_metric_server.cpp)
 
 # Chase-Lev work-stealing deque (needs libatomic for 32-byte std::atomic<WorkItem>)
 add_executable(test_work_stealing_deque test_work_stealing_deque.cpp)

@@ -31,7 +31,7 @@ co_await thr.join();
 | 模型 | 场景 | 调度 |
 |------|------|------|
 | **Online** | IO 密集型 (NIC, NVMe) | 每 worker 优先级队列 P0→P1→P2→P4 |
-| **Offline** | 计算密集型 (压缩, 编码) | Chase-Lev 工作偷取, NUMA 感知 |
+| **Offline** | 计算密集型 (压缩, 编码) | MPMC 工作偷取 (RingWorkQueue), NUMA 感知 |
 
 **挂起原理**：所有 `co_await` 走 C++20 三步协议。handle 存入队列/链表/堆，Scheduler 或 timer 恢复。
 
@@ -99,7 +99,7 @@ co_await this_coro::yield();
 
 | 特性 | Online | Offline |
 |------|--------|---------|
-| 调度 | P0→P1→P2 优先级队列 | Chase-Lev 工作偷取 |
+| 调度 | P0→P1→P2 优先级队列 | MPMC 工作偷取 (RingWorkQueue) |
 | 提交 | `submit_engine()` 到当前 worker | `group.submit()` 到全局队列 |
 | 亲和性 | AffinityBaton → enqueue_affine(P0) | AffinityBaton → add_to_worker(id, handle) |
 | IO | 支持 io_uring/libaio/SPDK | 纯 CPU 任务 |

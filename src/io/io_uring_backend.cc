@@ -1,11 +1,19 @@
 #include "io_uring_backend.h"
 #include "runtime/storage_error.h"
+#include "runtime/metric_counter.h"
+#include "runtime/metric_histogram.h"
 #include <liburing.h>
 #include <cstring>
 #include <stdexcept>
 #include <cassert>
 
 namespace storage::io {
+
+namespace {
+storage::runtime::metric::MetricCounter g_io_submitted;
+storage::runtime::metric::MetricCounter g_io_completed;
+storage::runtime::metric::MetricLatency g_io_latency;
+}
 
 IOUringBackend::IOUringBackend(size_t queue_depth, IIOBackend::RouteFn route)
     : queue_depth_(queue_depth) {
@@ -73,6 +81,7 @@ void IOUringBackend::submit_impl(IORequest req) {
         pending_.resize(std::max(pending_.size() * 2, idx + 1));
     }
     pending_[idx] = std::move(req);
+    g_io_submitted << 1;
 
     switch (pending_[idx].op) {
     case IORequest::kRead:
@@ -150,10 +159,18 @@ size_t IOUringBackend::poll(IOCompletion* out, size_t max) {
         out[count].callback = std::move(pending_[idx].callback);
 
         io_uring_cqe_seen(&ring_, cqe);
+        g_io_completed << 1;
         count++;
     }
 
     return count;
+}
+
+void register_io_metrics() {
+    using namespace storage::runtime::metric;
+    MetricRegistry::instance().register_counter("io/submitted", &g_io_submitted);
+    MetricRegistry::instance().register_counter("io/completed", &g_io_completed);
+    g_io_latency.register_with("io/latency");
 }
 
 }  // namespace storage::io

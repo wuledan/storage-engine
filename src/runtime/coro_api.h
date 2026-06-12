@@ -26,6 +26,7 @@
 #include "online_worker.h"
 #include "online_group.h"
 #include "work_stealing_executor.h"
+#include "metric_counter.h"
 #include <memory>
 #include <atomic>
 #include <type_traits>
@@ -36,6 +37,11 @@
 #include <cerrno>
 
 namespace storage::runtime {
+
+namespace {
+metric::MetricCounter g_coro_created_ctr;
+metric::MetricCounter g_coro_destroyed_ctr;
+}
 
 // ═══════════════════════════════════════════════════════
 // Thread-local: current coroutine handle (for coro_self)
@@ -175,6 +181,7 @@ inline int coro_create(coro_t *coro, const coro_attr_t * /*attr*/,
 
         // Auto-cleanup if detached before completion
         if (s->detached) {
+            g_coro_destroyed_ctr << 1;
             delete s;
         }
         co_return;
@@ -185,6 +192,7 @@ inline int coro_create(coro_t *coro, const coro_attr_t * /*attr*/,
     task.handle = {};
 
     *coro = static_cast<coro_t>(state);
+    g_coro_created_ctr << 1;
     return 0;
 }
 
@@ -224,6 +232,7 @@ struct coro_join_awaiter {
 
     void* await_resume() noexcept {
         void* ret = state->retval;
+        g_coro_destroyed_ctr << 1;
         delete state;
         return ret;
     }
@@ -246,6 +255,7 @@ inline int coro_detach(coro_t coro) {
     state->detached = true;
     // If already finished, clean up now
     if (state->done.load(std::memory_order_acquire)) {
+        g_coro_destroyed_ctr << 1;
         delete state;
     }
     return 0;
@@ -673,6 +683,12 @@ auto when_all(Fs&&... funcs) {
     };
 
     return WhenAllAwaiter{std::move(state)};
+}
+
+inline void register_coro_metrics() {
+    using namespace metric;
+    MetricRegistry::instance().register_counter("coro/created", &g_coro_created_ctr);
+    MetricRegistry::instance().register_counter("coro/destroyed", &g_coro_destroyed_ctr);
 }
 
 }  // namespace storage::runtime

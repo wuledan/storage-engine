@@ -5,6 +5,7 @@
 #include "work_stealing_executor.h"
 #include "worker_registry.h"
 #include "timer.h"
+#include "metric_counter.h"
 #include <hwloc.h>
 
 namespace storage::runtime {
@@ -15,6 +16,11 @@ thread_local Worker* tls_current_worker = nullptr;
 
 // Default worker-id resolver (returns "no affinity")
 size_t default_worker_id() { return SIZE_MAX; }
+}
+
+namespace {
+metric::MetricCounter g_tasks_executed;
+metric::MetricCounter g_coro_created;
 }
 
 // Define the function pointer declared in affinity_baton.h.
@@ -285,6 +291,7 @@ void Worker::worker_loop() {
     tls_current_worker = this;
     adapt::detail::get_current_worker_id = []() -> size_t { return tls_worker_id; };
     on_worker_start();
+    g_tasks_executed << 1;
     scheduler_.run();
     tls_current_worker = nullptr;
     tls_worker_id = SIZE_MAX;
@@ -294,6 +301,12 @@ void Worker::worker_loop() {
 Worker* current_worker() { return tls_current_worker; }
 OnlineWorker* current_online_worker() {
     return dynamic_cast<OnlineWorker*>(tls_current_worker);
+}
+
+void register_worker_metrics() {
+    using namespace metric;
+    MetricRegistry::instance().register_counter("worker/tasks_executed", &g_tasks_executed);
+    MetricRegistry::instance().register_counter("worker/coro_created", &g_coro_created);
 }
 
 }  // namespace storage::runtime

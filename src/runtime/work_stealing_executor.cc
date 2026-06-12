@@ -1,5 +1,6 @@
 #include "work_stealing_executor.h"
 #include "worker_registry.h"
+#include "metric_counter.h"
 #include <hwloc.h>
 #include <algorithm>
 #include <cstdlib>
@@ -13,6 +14,8 @@ thread_local folly::Executor* WorkStealingExecutor::tl_folly_executor_ = nullptr
 
 namespace {
 std::atomic<size_t> g_add_counter{0};
+metric::MetricCounter g_wse_tasks;
+metric::MetricCounter g_wse_steals;
 }  // anonymous namespace
 
 WorkStealingExecutor::WorkStealingExecutor(const Config& cfg) : cfg_(cfg) {
@@ -288,6 +291,7 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
         if (ws.yield_queue->try_dequeue(item)) {
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;  // tell yield() to use tls_source_queue
+            g_wse_tasks << 1;
             item.execute();
             if (item.tag == 0)
                 ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
@@ -304,6 +308,7 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
         if (ws.local_deque->try_dequeue_mc(item)) {
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;
+            g_wse_tasks << 1;
             item.execute();
             if (item.tag == 0)
                 ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
@@ -317,6 +322,7 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
         if (global_entry_->try_dequeue_mc(item)) {
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;
+            g_wse_tasks << 1;
             item.execute();
             if (item.tag == 0)
                 ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
@@ -339,11 +345,13 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
                 if (victim.local_deque->try_dequeue_mc(item)) {
                     tls_source_queue = ws.yield_queue.get();
                     tls_source_queue_idx = SIZE_MAX;
+                    g_wse_tasks << 1;
                     item.execute();
                     if (item.tag == 0)
                         ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
                     else
                         ws.coro_resumes.fetch_add(1, std::memory_order_relaxed);
+                    g_wse_steals << 1;
                     ws.steals_success.fetch_add(1, std::memory_order_relaxed);
                     stolen = true;
                     break;
@@ -365,6 +373,12 @@ size_t WorkStealingExecutor::current_worker_id() {
 
 WorkStealingExecutor* WorkStealingExecutor::current_executor() {
     return tl_executor_;
+}
+
+void register_wse_metrics() {
+    using namespace metric;
+    MetricRegistry::instance().register_counter("wse/tasks", &g_wse_tasks);
+    MetricRegistry::instance().register_counter("wse/steals", &g_wse_steals);
 }
 
 }  // namespace storage::runtime
