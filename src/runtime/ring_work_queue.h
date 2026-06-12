@@ -12,6 +12,7 @@ public:
 
     void enqueue(WorkItem item) noexcept override { ring_.enqueue(item); }
     bool try_dequeue(WorkItem& item) noexcept override { return ring_.dequeue(item); }
+    bool try_dequeue_mc(WorkItem& item) noexcept { return ring_.dequeue_mc(item); }
     size_t try_dequeue_batch(WorkItem* items, size_t max) noexcept override {
         return ring_.dequeue_bulk(items, max);
     }

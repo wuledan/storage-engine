@@ -61,11 +61,16 @@ static IOCoroTask timer_coro_fn(OnlineWorker* w) {
         auto expired = ts.expire(now);
 
         for (auto& node : expired) {
-            size_t qidx = (node.source_queue_idx != SIZE_MAX)
-                ? node.source_queue_idx : w->idx_engine_;
-            auto* q = w->get_queue(qidx);
-            if (q) {
-                q->enqueue(WorkItem::make_coro(node.handle));
+            if (node.on_expire) {
+                // Timed baton wait: callback sets timed_out and posts baton
+                node.on_expire();
+            } else {
+                size_t qidx = (node.source_queue_idx != SIZE_MAX)
+                    ? node.source_queue_idx : w->idx_engine_;
+                auto* q = w->get_queue(qidx);
+                if (q) {
+                    q->enqueue(WorkItem::make_coro(node.handle));
+                }
             }
         }
 

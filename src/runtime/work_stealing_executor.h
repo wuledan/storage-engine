@@ -4,6 +4,7 @@
 #include "work_stealing_deque.h"
 #include "adaptive_idle.h"
 #include "local_work_queue.h"
+#include "ring_work_queue.h"
 #include <folly/Executor.h>
 #include <atomic>
 #include <memory>
@@ -34,6 +35,7 @@ public:
         // Work queues
         std::unique_ptr<WorkStealingDeque> local_deque;  // owner LIFO pop, thief FIFO steal
         std::unique_ptr<LocalWorkQueue> yield_queue;     // yield() target for this worker
+        std::unique_ptr<RingWorkQueue> affine_queue;     // MPSC — external threads (timer, baton) push
 
         // Thread + coordination
         std::thread thread;
@@ -93,14 +95,14 @@ public:
         return tl_folly_executor_;
     }
 
-    // ── Offline timer wheel ──
-    OfflineTimerWheel& timer_wheel() noexcept { return timer_wheel_; }
-
 private:
     void worker_loop(WorkerState& ws);
 
     Config cfg_;
     std::vector<std::unique_ptr<WorkerState>> workers_;
+
+    // Global MPMC ring for external submissions (via add() / folly::Executor).
+    std::unique_ptr<RingWorkQueue> global_entry_;
 
     // TLS
     static thread_local size_t tl_worker_id_;
@@ -112,10 +114,6 @@ private:
     // NUMA peer lists
     std::vector<std::vector<size_t>> numa_peers_;  // per worker: peer indices
 
-    // ── Offline timer ──
-    OfflineTimerWheel timer_wheel_;
-    std::thread timer_thread_;
-    std::atomic<bool> stop_timer_{false};
 };
 
 }  // namespace storage::runtime

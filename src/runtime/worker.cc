@@ -2,6 +2,9 @@
 #include "online_worker.h"
 #include "policy_factory.h"
 #include "affinity_baton.h"
+#include "work_stealing_executor.h"
+#include "worker_registry.h"
+#include "timer.h"
 #include <hwloc.h>
 
 namespace storage::runtime {
@@ -97,6 +100,79 @@ void AffinityMutex::unlock() {
         } else {
             waiters->handle.resume();
         }
+    }
+}
+
+// ── AffinityBaton::TimedAwaiter::await_suspend ──
+// Registers with both the baton waiter chain AND the timer system.
+// Timer expiry calls on_expire which sets timed_out and posts the baton.
+void AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexcept {
+    node.handle = h;
+    node.worker_id = detail::get_current_worker_id();
+    node.next = nullptr;
+
+    // 1. Register with baton (same CAS chain logic as Awaiter)
+    auto* old = baton.waiters_.load(std::memory_order_acquire);
+    do {
+        if (reinterpret_cast<uintptr_t>(old) & kPostedBit) {
+            // Already posted — don't suspend
+            result = WaitResult::kSignaled;
+            h.resume();
+            return;
+        }
+        node.next = clear_posted(old);
+    } while (!baton.waiters_.compare_exchange_weak(
+        old, &node,
+        std::memory_order_release,
+        std::memory_order_acquire));
+
+    // 2. Zero / negative timeout → immediate timeout
+    if (timeout <= Duration::zero()) {
+        state->timed_out.store(true, std::memory_order_release);
+        baton.post_direct();
+        return;
+    }
+
+    // 3. Create route function (for timer callback — preserves affinity)
+    RouteFunc route;
+    size_t source_worker = SIZE_MAX;
+    if (auto* ow = current_online_worker()) {
+        route = ow->make_route_func();
+    } else if (auto* exec = WorkStealingExecutor::current_executor()) {
+        route = exec->make_route_func();
+        source_worker = WorkerRegistry::instance().get_global_id_for_offline(
+            exec, node.worker_id);
+    }
+    // If neither, route stays empty → post_direct fallback
+
+    // 4. Register with timer system
+    Clock::time_point deadline = Clock::now() + timeout;
+
+    TimerNode tn;
+    tn.deadline = deadline;
+    tn.handle = h;
+    tn.source_queue_idx = (tls_source_queue_idx != SIZE_MAX)
+        ? tls_source_queue_idx : SIZE_MAX;
+    tn.source_worker_id = source_worker;
+
+    auto state_copy = state;
+    tn.on_expire = [state_copy, route = std::move(route), &baton = this->baton]() {
+        state_copy->timed_out.store(true, std::memory_order_release);
+        if (route) {
+            baton.post(route);
+        } else {
+            baton.post_direct();
+        }
+    };
+
+    if (auto* ow = current_online_worker()) {
+        ow->timer_state().insert(std::move(tn));
+    } else if (WorkStealingExecutor::current_executor()) {
+        global_offline_timer().insert(std::move(tn));
+    } else {
+        // No timer context — signal timeout immediately
+        state->timed_out.store(true, std::memory_order_release);
+        baton.post_direct();
     }
 }
 

@@ -10,12 +10,17 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 
 namespace storage::runtime::adapt {
+
+// Duration alias matching runtime::Duration (steady_clock::duration)
+using Duration = std::chrono::steady_clock::duration;
 
 // RouteFunc: routes a coroutine handle to the specified worker.
 //   worker_id: target worker's ID (from WaiterNode.worker_id)
@@ -119,6 +124,39 @@ public:
 
         void await_resume() const noexcept {}
     };
+
+    // ── Timed wait ──
+
+    enum class WaitResult { kSignaled, kTimeout };
+
+    // Shared state between TimedAwaiter and the timer expiry callback.
+    struct TimedWaitState {
+        std::atomic<bool> timed_out{false};
+    };
+
+    struct TimedAwaiter {
+        AffinityBaton& baton;
+        Duration timeout;
+        WaiterNode node;
+        std::shared_ptr<TimedWaitState> state;
+        WaitResult result{WaitResult::kTimeout};
+
+        bool await_ready() const noexcept {
+            return baton.ready();
+        }
+
+        // Defined in worker.cc (needs timer.h, online_worker.h, etc.)
+        void await_suspend(std::coroutine_handle<> h) noexcept;
+
+        WaitResult await_resume() const noexcept {
+            return state->timed_out.load(std::memory_order_acquire)
+                ? WaitResult::kTimeout : WaitResult::kSignaled;
+        }
+    };
+
+    TimedAwaiter wait_for(Duration timeout) noexcept {
+        return {*this, timeout, {}, std::make_shared<TimedWaitState>(), WaitResult::kTimeout};
+    }
 
     Awaiter operator co_await() noexcept {
         return Awaiter{*this, WaiterNode{}};

@@ -17,8 +17,10 @@ void OfflineWorkerGroup::stop() { executor_->stop(); executor_->join(); }
 void OfflineWorkerGroup::submit(WorkItem item) { executor_->add(std::move(item)); }
 
 void OfflineWorkerGroup::submit_to_worker(size_t worker_id, WorkItem item) {
+    // Push to the worker's affine queue (MPSC — safe for external threads).
+    // The worker drains its affine queue with highest priority in worker_loop.
     auto& ws = executor_->worker(worker_id);
-    ws.local_deque->push(std::move(item));
+    ws.affine_queue->enqueue(std::move(item));
     ws.has_work.store(true, std::memory_order_release);
     ws.park.notify();
 }

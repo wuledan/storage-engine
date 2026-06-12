@@ -1,4 +1,5 @@
 #include "work_stealing_executor.h"
+#include "worker_registry.h"
 #include <hwloc.h>
 #include <algorithm>
 #include <cstdlib>
@@ -136,6 +137,8 @@ WorkStealingExecutor::WorkStealingExecutor(const Config& cfg) : cfg_(cfg) {
             ws->local_deque = std::make_unique<WorkStealingDeque>();
             ws->yield_queue = std::make_unique<LocalWorkQueue>(
                 QueueType::kEngine, Priority::kMedium, "wse_yield");
+            ws->affine_queue = std::make_unique<RingWorkQueue>(
+                QueueType::kAffine, Priority::kHigh, "ws_affine", 1024);
             ws->running.store(false, std::memory_order_relaxed);
             ws->has_work.store(false, std::memory_order_relaxed);
 
@@ -160,11 +163,21 @@ WorkStealingExecutor::WorkStealingExecutor(const Config& cfg) : cfg_(cfg) {
         workers_[i]->numa_peers = numa_peers_[i];
     }
 
+    // ── Global entry ring (MPMC) for external submissions ──
+    global_entry_ = std::make_unique<RingWorkQueue>(
+        QueueType::kEngine, Priority::kMedium, "ws_global", 65536);
+
+    // ── Register offline workers ──
+    for (size_t i = 0; i < workers_.size(); ++i) {
+        WorkerRegistry::instance().register_offline_worker(
+            this, i, workers_[i]->numa_node);
+    }
 }
 
 WorkStealingExecutor::~WorkStealingExecutor() {
     stop();
     join();
+    WorkerRegistry::instance().remove_executor(this);
 }
 
 void WorkStealingExecutor::start() {
@@ -187,33 +200,14 @@ void WorkStealingExecutor::start() {
         });
     }
 
-    // Start dedicated timer thread
-    stop_timer_.store(false, std::memory_order_release);
-    timer_thread_ = std::thread([this] {
-        while (!stop_timer_.load(std::memory_order_acquire)) {
-            // Expire due timers
-            auto now = Clock::now();
-            auto expired = timer_wheel_.expire(now);
-            for (auto& node : expired) {
-                add_to_worker(node.source_worker_id, node.handle);
-            }
-            // Wait until next deadline or a new timer insertion
-            timer_wheel_.wait_for_work_or_deadline();
-        }
-    });
+    // Start global offline timer thread (shared across all executors)
+    start_global_timer_thread();
 }
 
 void WorkStealingExecutor::stop() {
     for (auto& ws_ptr : workers_) {
         ws_ptr->running.store(false, std::memory_order_release);
         ws_ptr->park.notify();
-    }
-
-    // Stop the timer thread
-    stop_timer_.store(true, std::memory_order_release);
-    timer_wheel_.notify();
-    if (timer_thread_.joinable()) {
-        timer_thread_.join();
     }
 }
 
@@ -253,18 +247,27 @@ void WorkStealingExecutor::add(folly::Func func) {
 }
 
 void WorkStealingExecutor::add(WorkItem item) {
+    global_entry_->enqueue(std::move(item));
+    // Wake a random worker
     size_t idx = g_add_counter.fetch_add(1, std::memory_order_relaxed) % workers_.size();
-    auto& ws = *workers_[idx];
-    ws.local_deque->push(std::move(item));
-    ws.park.notify();  // wake the worker if idle
+    workers_[idx]->park.notify();
 }
 
-void WorkStealingExecutor::add_to_worker(size_t worker_id, std::coroutine_handle<> h) {
-    if (worker_id >= workers_.size()) return;
-    auto& ws = *workers_[worker_id];
-    ws.local_deque->push(WorkItem::make_coro(h));
-    ws.has_work.store(true, std::memory_order_release);
-    ws.park.notify();
+void WorkStealingExecutor::add_to_worker(size_t local_worker_id, std::coroutine_handle<> h) {
+    // Look up the global ID for this executor's local worker
+    size_t global_id = WorkerRegistry::instance().get_global_id_for_offline(this, local_worker_id);
+    auto* handle = WorkerRegistry::instance().get_handle(global_id);
+    if (handle) {
+        handle->push_affine(WorkItem::make_coro(h));
+        // Wake the target worker
+        if (handle->type == WorkerHandle::kOffline && handle->offline.exec == this) {
+            auto& ws = *workers_[handle->offline.local_id];
+            ws.has_work.store(true, std::memory_order_release);
+            ws.park.notify();
+        } else if (handle->type == WorkerHandle::kOnline) {
+            // Online worker — wake is handled internally by enqueue_affine
+        }
+    }
 }
 
 adapt::RouteFunc WorkStealingExecutor::make_route_func() {
@@ -287,6 +290,18 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
     while (ws.running.load(std::memory_order_acquire)) {
         WorkItem item;
 
+        // 0. Drain affine queue (baton/mutex wakeups, timer expiry — highest priority)
+        if (ws.affine_queue->try_dequeue(item)) {
+            tls_source_queue = ws.affine_queue.get();
+            tls_source_queue_idx = SIZE_MAX;
+            item.execute();
+            if (item.tag == 0)
+                ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+            else
+                ws.coro_resumes.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
         // 1. Drain yield queue (coroutines that yielded back to this worker)
         if (ws.yield_queue->try_dequeue(item)) {
             tls_source_queue = ws.yield_queue.get();
@@ -301,6 +316,19 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
 
         // 2. Pop from own local deque (LIFO — best cache locality)
         if (ws.local_deque->pop(item)) {
+            tls_source_queue = ws.yield_queue.get();
+            tls_source_queue_idx = SIZE_MAX;
+            item.execute();
+            if (item.tag == 0)
+                ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+            else
+                ws.coro_resumes.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        // 2.5 Pull from global entry queue (external submissions via add())
+        // Uses multi-consumer dequeue since all workers drain this ring.
+        if (global_entry_->try_dequeue_mc(item)) {
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;
             item.execute();
@@ -337,14 +365,6 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
             }
         }
         if (stolen) continue;
-
-        // 3.5 Check timer wheel for expired timers (opportunistic — timer thread handles the main path)
-        {
-            auto expired = timer_wheel_.expire(Clock::now());
-            for (auto& node : expired) {
-                add_to_worker(node.source_worker_id, node.handle);
-            }
-        }
 
         // 4. Nothing found — park (adaptive idle: spin → yield → cv wait)
         ws.parks.fetch_add(1, std::memory_order_relaxed);

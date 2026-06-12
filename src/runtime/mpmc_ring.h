@@ -79,6 +79,34 @@ public:
         return n;
     }
 
+    // 多消费者出队 (DPDK: __rte_ring_do_dequeue, MC)
+    // 使用 CAS 在 cons_.head 上预留槽位，适用于多线程并发消费。
+    bool dequeue_mc(T& obj) noexcept {
+        return dequeue_bulk_mc(&obj, 1) == 1;
+    }
+
+    size_t dequeue_bulk_mc(T* objs, size_t n) noexcept {
+        size_t cons_head, cons_next;
+        size_t entries;
+
+        do {
+            cons_head = cons_.head.load(std::memory_order_acquire);
+            entries = prod_.tail.load(std::memory_order_acquire) - cons_head;
+            n = std::min(n, entries);
+            if (n == 0) return 0;
+            cons_next = cons_head + n;
+        } while (!cons_.head.compare_exchange_weak(cons_head, cons_next,
+                  std::memory_order_acq_rel, std::memory_order_acquire));
+
+        // 拷贝数据 (槽位已预留，安全)
+        for (size_t i = 0; i < n; ++i)
+            objs[i] = ring_[(cons_head + i) & mask_];
+
+        // 更新 tail (无需 CAS，当前消费者独占总槽位)
+        cons_.tail.store(cons_next, std::memory_order_release);
+        return n;
+    }
+
     size_t count() const noexcept {
         return prod_.tail.load(std::memory_order_acquire)
              - cons_.head.load(std::memory_order_acquire);
