@@ -13,8 +13,9 @@ void WorkerHandle::push_affine(WorkItem item) {
     if (type == kOnline) {
         online->enqueue_affine(item.coro);
     } else if (offline.exec) {
+        // Offline: push to local_deque (stealable affinity — pure compute, no IO context needed)
         auto& ws = offline.exec->worker(offline.local_id);
-        ws.affine_queue->enqueue(std::move(item));
+        ws.local_deque->push(std::move(item));
         ws.has_work.store(true, std::memory_order_release);
         ws.park.notify();
     }

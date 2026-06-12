@@ -35,7 +35,6 @@ public:
         // Work queues
         std::unique_ptr<WorkStealingDeque> local_deque;  // owner LIFO pop, thief FIFO steal
         std::unique_ptr<LocalWorkQueue> yield_queue;     // yield() target for this worker
-        std::unique_ptr<RingWorkQueue> affine_queue;     // MPSC — external threads (timer, baton) push
 
         // Thread + coordination
         std::thread thread;
