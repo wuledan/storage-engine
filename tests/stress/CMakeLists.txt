@@ -103,3 +103,61 @@ endif()
 sanitizer_add(test_idle_degradation)
 include(GoogleTest)
 gtest_discover_tests(test_idle_degradation)
+
+# Online IO longevity test (20min, 4 workers, QD=32)
+add_executable(test_longevity_online test_longevity_online.cpp)
+target_link_libraries(test_longevity_online
+    PRIVATE
+        io
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+if(LIBURING)
+    target_link_libraries(test_longevity_online PRIVATE ${LIBURING})
+endif()
+target_include_directories(test_longevity_online PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_longevity_online PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_longevity_online)
+include(GoogleTest)
+gtest_discover_tests(test_longevity_online)
+
+# Offline CPU longevity test (20min, 8 workers, random CPU tasks)
+add_executable(test_longevity_offline test_longevity_offline.cpp)
+target_link_libraries(test_longevity_offline
+    PRIVATE
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+target_include_directories(test_longevity_offline PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_longevity_offline PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_longevity_offline)
+include(GoogleTest)
+gtest_discover_tests(test_longevity_offline)
+
+# Mixed online + offline longevity test (20min, 2 online + 4 offline workers, cross-group sync)
+add_executable(test_longevity_mixed test_longevity_mixed.cpp)
+target_link_libraries(test_longevity_mixed
+    PRIVATE
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Folly::folly
+        Threads::Threads
+)
+target_include_directories(test_longevity_mixed PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_longevity_mixed PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_longevity_mixed)
+include(GoogleTest)
+gtest_discover_tests(test_longevity_mixed)
