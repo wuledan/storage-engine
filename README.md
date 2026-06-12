@@ -119,6 +119,19 @@ co_await this_coro::yield();
 - 详细分析: [docs/2026-06-10/24-io-perf-analysis.md](docs/2026-06-10/24-io-perf-analysis.md)
 - 原语设计: [docs/2026-06-10/25-coroutine-primitives.md](docs/2026-06-10/25-coroutine-primitives.md)
 
+### Offline Work-Stealing (CPU-bound scaling)
+
+| Work/task | 1 core | 2 core | 4 core | 8 core |
+|-----------|--------|--------|--------|--------|
+| 10μs | 95K | 182K | 358K | 702K |
+| 50μs | 19.7K | 39.5K | 79K | 157K |
+| 100μs | 9.9K | 19.9K | 39.8K | 79.3K |
+
+- Near-perfect linear scaling for CPU-bound workloads (100μs: 2.0x per doubling)
+- Steal verification: 1000 tasks→worker-0, worker-1 steals 500
+- MPMC ring (RingWorkQueue), NUMA-aware stealing
+- Benchmark: `./tests/stress/test_work_stealing_bench`
+
 ## Benchmarking
 
 ```bash
