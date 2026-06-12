@@ -134,7 +134,8 @@ WorkStealingExecutor::WorkStealingExecutor(const Config& cfg) : cfg_(cfg) {
                 ws->hwloc_cpu = -1;
             }
 
-            ws->local_deque = std::make_unique<WorkStealingDeque>();
+            ws->local_deque = std::make_unique<RingWorkQueue>(
+                QueueType::kEngine, Priority::kMedium, "ws_local", 4096);
             ws->yield_queue = std::make_unique<LocalWorkQueue>(
                 QueueType::kEngine, Priority::kMedium, "wse_yield");
             ws->running.store(false, std::memory_order_relaxed);
@@ -246,8 +247,8 @@ void WorkStealingExecutor::add(folly::Func func) {
 
 void WorkStealingExecutor::add(WorkItem item) {
     if (tl_executor_ == this) {
-        // Worker context: push to own local_deque (SP, no lock)
-        workers_[tl_worker_id_]->local_deque->push(std::move(item));
+        // Worker context: push to own local_deque (MPMC enqueue)
+        workers_[tl_worker_id_]->local_deque->enqueue(std::move(item));
     } else {
         // External thread: push to global entry
         global_entry_->enqueue(std::move(item));
@@ -259,7 +260,7 @@ void WorkStealingExecutor::add(WorkItem item) {
 void WorkStealingExecutor::add_to_worker(size_t worker_id, std::coroutine_handle<> h) {
     if (worker_id >= workers_.size()) return;
     auto& ws = *workers_[worker_id];
-    ws.local_deque->push(WorkItem::make_coro(h));
+    ws.local_deque->enqueue(WorkItem::make_coro(h));
     ws.park.notify();
 }
 
@@ -295,8 +296,12 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
             continue;
         }
 
-        // 2. Pop from own local deque (LIFO — best cache locality)
-        if (ws.local_deque->pop(item)) {
+        // 2. Pop from own local ring (FIFO, MPMC)
+        // NOTE: must use try_dequeue_mc (CAS) even for the owner, because
+        // thieves call try_dequeue_mc concurrently on the same ring. Using
+        // try_dequeue (SC, no CAS) would let the owner's non-atomic head
+        // update overwrite a thief's CAS result, causing double-consumption.
+        if (ws.local_deque->try_dequeue_mc(item)) {
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;
             item.execute();
@@ -330,7 +335,8 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
             for (size_t i = 0; i < attempts && !stolen; ++i) {
                 size_t victim_idx = peers[(start_idx + i) % peers.size()];
                 auto& victim = *workers_[victim_idx];
-                if (victim.local_deque->steal(item)) {
+                // MC dequeue: multiple thieves may contend on the same victim's ring
+                if (victim.local_deque->try_dequeue_mc(item)) {
                     tls_source_queue = ws.yield_queue.get();
                     tls_source_queue_idx = SIZE_MAX;
                     item.execute();

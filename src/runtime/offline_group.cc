@@ -18,7 +18,7 @@ void OfflineWorkerGroup::submit(WorkItem item) { executor_->add(std::move(item))
 
 void OfflineWorkerGroup::submit_to_worker(size_t worker_id, WorkItem item) {
     // Push to the worker's local deque (stealable — pure compute, no strict affinity needed).
-    executor_->worker(worker_id).local_deque->push(std::move(item));
+    executor_->worker(worker_id).local_deque->enqueue(std::move(item));
     executor_->worker(worker_id).park.notify();
 }
 

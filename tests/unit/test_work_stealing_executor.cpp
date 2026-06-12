@@ -131,9 +131,9 @@ TEST(WorkStealingExecutor, WorkerLocalDeque) {
     exec.start();
 
     g_counter = 0;
-    // Push directly to worker 0's local deque via public WorkerState API
+    // Enqueue directly to worker 0's local ring via public WorkerState API
     for (int i = 0; i < 100; ++i) {
-        exec.worker(0).local_deque->push(WorkItem::make_func(inc_counter));
+        exec.worker(0).local_deque->enqueue(WorkItem::make_func(inc_counter));
     }
     exec.worker(0).has_work.store(true, std::memory_order_release);
     exec.worker(0).park.notify();
@@ -158,9 +158,9 @@ TEST(WorkStealingExecutor, WorkStealing) {
     WorkStealingExecutor exec(cfg);
     exec.start();
 
-    // Push tasks to worker 0's local deque only
+    // Enqueue tasks to worker 0's local ring only
     for (int i = 0; i < 50; ++i) {
-        exec.worker(0).local_deque->push(WorkItem::make_func(spin_a_bit));
+        exec.worker(0).local_deque->enqueue(WorkItem::make_func(spin_a_bit));
     }
     exec.worker(0).has_work.store(true, std::memory_order_release);
     exec.worker(0).park.notify();

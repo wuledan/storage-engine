@@ -1,7 +1,6 @@
 #pragma once
 #include "coro_primitives.h"
 #include "timer.h"
-#include "work_stealing_deque.h"
 #include "adaptive_idle.h"
 #include "local_work_queue.h"
 #include "ring_work_queue.h"
@@ -33,7 +32,7 @@ public:
         int hwloc_cpu{-1};
 
         // Work queues
-        std::unique_ptr<WorkStealingDeque> local_deque;  // owner LIFO pop, thief FIFO steal
+        std::unique_ptr<RingWorkQueue> local_deque;  // MPMC ring, FIFO, lock-free
         std::unique_ptr<LocalWorkQueue> yield_queue;     // yield() target for this worker
 
         // Thread + coordination
