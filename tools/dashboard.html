@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Storage Engine Metrics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; margin: 0; padding: 16px; }
+  .header { display: flex; gap: 24px; margin-bottom: 16px; flex-wrap: wrap; }
+  .card { background: #16213e; border-radius: 8px; padding: 12px 16px; min-width: 140px; }
+  .card .label { font-size: 11px; color: #8899aa; text-transform: uppercase; }
+  .card .value { font-size: 24px; font-weight: bold; color: #00d4aa; }
+  .row { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+  .panel { background: #16213e; border-radius: 8px; padding: 16px; flex: 1; min-width: 300px; }
+  .panel h3 { margin: 0 0 12px 0; font-size: 14px; color: #8899aa; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #2a2a4a; }
+  th { color: #8899aa; }
+  canvas { max-height: 250px; }
+  .error { color: #ff6b6b; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="card"><div class="label">IO Submitted</div><div class="value" id="io-submitted">-</div></div>
+  <div class="card"><div class="label">IO Completed</div><div class="value" id="io-completed">-</div></div>
+  <div class="card"><div class="label">Scheduler Iters</div><div class="value" id="sched-iters">-</div></div>
+  <div class="card"><div class="label">Coro Created</div><div class="value" id="coro-created">-</div></div>
+  <div class="card"><div class="label">WSE Steals</div><div class="value" id="wse-steals">-</div></div>
+</div>
+<div class="row">
+  <div class="panel">
+    <h3>Worker Table</h3>
+    <table id="worker-table"><thead><tr><th>Worker</th><th>Tasks</th><th>Steals</th><th>Parks</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="panel">
+    <h3>IO Latency Distribution</h3>
+    <canvas id="latency-chart"></canvas>
+  </div>
+</div>
+<div class="error" id="error-msg"></div>
+
+<script>
+const METRICS_URL = 'http://localhost:9090/metrics';
+let latencyChart = null;
+
+function safeNum(v, def) { const n = Number(v); return isNaN(n) ? def : n; }
+
+async function refresh() {
+  try {
+    const r = await fetch(METRICS_URL);
+    const m = await r.json();
+    document.getElementById('error-msg').textContent = '';
+    
+    // Top cards
+    document.getElementById('io-submitted').textContent = safeNum(m['io/submitted'], 0).toLocaleString();
+    document.getElementById('io-completed').textContent = safeNum(m['io/completed'], 0).toLocaleString();
+    document.getElementById('sched-iters').textContent = safeNum(m['scheduler/iters'], 0).toLocaleString();
+    document.getElementById('coro-created').textContent = safeNum(m['coro/created'], 0).toLocaleString();
+    document.getElementById('wse-steals').textContent = safeNum(m['wse/steals'], 0).toLocaleString();
+    
+    // IO latency chart
+    const ioLat = m['io/latency'];
+    if (ioLat && typeof ioLat === 'object') {
+      const ctx = document.getElementById('latency-chart').getContext('2d');
+      if (latencyChart) latencyChart.destroy();
+      latencyChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: ['P50', 'P90', 'P99', 'P999'],
+          datasets: [{
+            label: 'IO Latency (μs)',
+            data: [
+              safeNum(ioLat.p50_ns, 0) / 1000,
+              safeNum(ioLat.p90_ns, 0) / 1000,
+              safeNum(ioLat.p99_ns, 0) / 1000,
+              safeNum(ioLat.p999_ns, 0) / 1000
+            ],
+            backgroundColor: ['#00d4aa', '#3498db', '#f39c12', '#e74c3c']
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: '#8899aa' } } },
+          scales: {
+            x: { ticks: { color: '#8899aa' }, grid: { display: false } },
+            y: { ticks: { color: '#8899aa' }, grid: { color: '#2a2a4a' }, title: { display: true, text: 'μs', color: '#8899aa' } }
+          }
+        }
+      });
+    }
+    
+    // Worker table
+    const tbody = document.querySelector('#worker-table tbody');
+    tbody.innerHTML = '';
+    if (m['worker/tasks']) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>Online</td><td>${safeNum(m['worker/tasks'], 0).toLocaleString()}</td><td>-</td><td>-</td>`;
+      tbody.appendChild(tr);
+    }
+    if (m['wse/tasks']) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>Offline</td><td>${safeNum(m['wse/tasks'], 0).toLocaleString()}</td><td>${safeNum(m['wse/steals'], 0).toLocaleString()}</td><td>-</td>`;
+      tbody.appendChild(tr);
+    }
+  } catch(e) {
+    document.getElementById('error-msg').textContent = 'Metrics server not reachable (port 9090). Start with: MetricServer srv; srv.start();';
+  }
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
