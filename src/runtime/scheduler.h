@@ -37,7 +37,10 @@ public:
     void set_policy(SchedulingPolicy* policy) noexcept { policy_ = policy; }
     void set_idle(AdaptiveIdle* idle) noexcept { idle_ = idle; }
     void set_perf(WorkerPerf* perf) noexcept { perf_ = perf; }
-    void set_io_backend(storage::io::IIOBackend* backend) noexcept { io_backend_ = backend; }
+    void set_io_backend(storage::io::IIOBackend* backend) noexcept {
+        io_backend_ = backend;
+        if (backend) busy_poll_ = true;  // busypoll drains ALL queues → prevents P1/P2 starvation
+    }
     void set_affine_idx(size_t idx) noexcept { affine_idx_ = idx; }
     void set_busy_poll(bool v) noexcept { busy_poll_ = v; }
     void set_disk_io_idx(size_t idx) noexcept { disk_io_idx_ = idx; }
