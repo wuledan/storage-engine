@@ -11,6 +11,7 @@ struct OfflineGroupStats {
     size_t worker_count{0};
     uint64_t tasks_submitted{0};
     uint64_t tasks_completed{0};
+    uint64_t coro_resumes{0};
     uint64_t steals_success{0};
     uint64_t steals_failed{0};
     uint64_t parks{0};

@@ -17,6 +17,7 @@ IOUringBackend::IOUringBackend(size_t queue_depth, IIOBackend::RouteFn route)
     std::memset(&params, 0, sizeof(params));
     params.flags |= IORING_SETUP_SQPOLL;
     params.flags |= IORING_SETUP_SQ_AFF;     // 需要 sq_thread_cpu 生效
+    params.flags |= IORING_SETUP_IOPOLL;     // kernel polls NVMe CQ, no interrupts
     params.sq_thread_idle = 0;               // 永不 idle，紧密自旋
     params.sq_thread_cpu = 2;               // CPU2 — dedicated SQPOLL core
     int ret = io_uring_queue_init_params(queue_depth_, &ring_, &params);

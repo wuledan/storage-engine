@@ -2,7 +2,6 @@
 #include <hwloc.h>
 #include <algorithm>
 #include <cstdlib>
-#include <mutex>
 #include <numeric>
 
 namespace storage::runtime {
@@ -161,10 +160,6 @@ WorkStealingExecutor::WorkStealingExecutor(const Config& cfg) : cfg_(cfg) {
         workers_[i]->numa_peers = numa_peers_[i];
     }
 
-    // ── Create global submission queue ──
-    global_queue_ = std::make_unique<RingWorkQueue>(
-        QueueType::kEngine, Priority::kMedium,
-        cfg_.name_prefix + "_global", 4096);
 }
 
 WorkStealingExecutor::~WorkStealingExecutor() {
@@ -191,12 +186,34 @@ void WorkStealingExecutor::start() {
             worker_loop(*ws);
         });
     }
+
+    // Start dedicated timer thread
+    stop_timer_.store(false, std::memory_order_release);
+    timer_thread_ = std::thread([this] {
+        while (!stop_timer_.load(std::memory_order_acquire)) {
+            // Expire due timers
+            auto now = Clock::now();
+            auto expired = timer_wheel_.expire(now);
+            for (auto& node : expired) {
+                add_to_worker(node.source_worker_id, node.handle);
+            }
+            // Wait until next deadline or a new timer insertion
+            timer_wheel_.wait_for_work_or_deadline();
+        }
+    });
 }
 
 void WorkStealingExecutor::stop() {
     for (auto& ws_ptr : workers_) {
         ws_ptr->running.store(false, std::memory_order_release);
         ws_ptr->park.notify();
+    }
+
+    // Stop the timer thread
+    stop_timer_.store(true, std::memory_order_release);
+    timer_wheel_.notify();
+    if (timer_thread_.joinable()) {
+        timer_thread_.join();
     }
 }
 
@@ -236,12 +253,10 @@ void WorkStealingExecutor::add(folly::Func func) {
 }
 
 void WorkStealingExecutor::add(WorkItem item) {
-    global_queue_->enqueue(std::move(item));
-    // Wake a worker via round-robin to distribute wake-up load
-    if (!workers_.empty()) {
-        size_t idx = g_add_counter.fetch_add(1, std::memory_order_relaxed) % workers_.size();
-        workers_[idx]->park.notify();
-    }
+    size_t idx = g_add_counter.fetch_add(1, std::memory_order_relaxed) % workers_.size();
+    auto& ws = *workers_[idx];
+    ws.local_deque->push(std::move(item));
+    ws.park.notify();  // wake the worker if idle
 }
 
 void WorkStealingExecutor::add_to_worker(size_t worker_id, std::coroutine_handle<> h) {
@@ -272,39 +287,31 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
     while (ws.running.load(std::memory_order_acquire)) {
         WorkItem item;
 
-        // 0. Drain yield queue (coroutines that yielded back to this worker)
+        // 1. Drain yield queue (coroutines that yielded back to this worker)
         if (ws.yield_queue->try_dequeue(item)) {
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;  // tell yield() to use tls_source_queue
             item.execute();
-            ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+            if (item.tag == 0)
+                ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+            else
+                ws.coro_resumes.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
-        // 1. Pop from own local deque (LIFO — best cache locality)
+        // 2. Pop from own local deque (LIFO — best cache locality)
         if (ws.local_deque->pop(item)) {
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;
             item.execute();
-            ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+            if (item.tag == 0)
+                ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+            else
+                ws.coro_resumes.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
-        // 2. Try to dequeue from global queue
-        //    Note: RingWorkQueue dequeue is single-consumer only, so we serialize
-        //    with a mutex.  Contention is low because most tasks are stolen locally.
-        {
-            std::lock_guard<std::mutex> lock(global_mutex_);
-            if (global_queue_->try_dequeue(item)) {
-                tls_source_queue = ws.yield_queue.get();
-                tls_source_queue_idx = SIZE_MAX;
-                item.execute();
-                ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
-                continue;
-            }
-        }
-
-        // 3. Steal from another worker (NUMA-local if enabled)
+        // 3. Steal from peers (NUMA-local)
         bool stolen = false;
         const auto& peers = ws.numa_peers;
         if (!peers.empty()) {
@@ -318,7 +325,10 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
                     tls_source_queue = ws.yield_queue.get();
                     tls_source_queue_idx = SIZE_MAX;
                     item.execute();
-                    ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+                    if (item.tag == 0)
+                        ws.tasks_executed.fetch_add(1, std::memory_order_relaxed);
+                    else
+                        ws.coro_resumes.fetch_add(1, std::memory_order_relaxed);
                     ws.steals_success.fetch_add(1, std::memory_order_relaxed);
                     stolen = true;
                     break;
@@ -327,6 +337,14 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
             }
         }
         if (stolen) continue;
+
+        // 3.5 Check timer wheel for expired timers (opportunistic — timer thread handles the main path)
+        {
+            auto expired = timer_wheel_.expire(Clock::now());
+            for (auto& node : expired) {
+                add_to_worker(node.source_worker_id, node.handle);
+            }
+        }
 
         // 4. Nothing found — park (adaptive idle: spin → yield → cv wait)
         ws.parks.fetch_add(1, std::memory_order_relaxed);

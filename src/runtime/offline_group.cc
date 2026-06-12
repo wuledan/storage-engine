@@ -29,6 +29,7 @@ OfflineGroupStats OfflineWorkerGroup::stats() const {
     for (size_t i = 0; i < executor_->num_workers(); ++i) {
         auto& ws = executor_->worker(i);
         s.tasks_completed += ws.tasks_executed.load();
+        s.coro_resumes += ws.coro_resumes.load();
         s.steals_success += ws.steals_success.load();
         s.steals_failed += ws.steals_failed.load();
         s.parks += ws.parks.load();

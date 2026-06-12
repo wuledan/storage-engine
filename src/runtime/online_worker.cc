@@ -50,6 +50,29 @@ static IOCoroTask io_poll_coro_fn(OnlineWorker* w) {
     }
 }
 
+// ── Timer coroutine ──
+// Runs on the P4 (timer) queue: drains expired timers and re-enqueues
+// the sleeping coroutines to their source queues, then yields back
+// to the timer queue.
+static IOCoroTask timer_coro_fn(OnlineWorker* w) {
+    while (true) {
+        auto& ts = w->timer_state();
+        auto now = Clock::now();
+        auto expired = ts.expire(now);
+
+        for (auto& node : expired) {
+            size_t qidx = (node.source_queue_idx != SIZE_MAX)
+                ? node.source_queue_idx : w->idx_engine_;
+            auto* q = w->get_queue(qidx);
+            if (q) {
+                q->enqueue(WorkItem::make_coro(node.handle));
+            }
+        }
+
+        co_await yield_to(w->idx_timer_);
+    }
+}
+
 }  // anonymous namespace
 
 OnlineWorker::OnlineWorker(const Worker::Config& cfg)
@@ -71,6 +94,17 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     idx_timer_ = add_queue(std::make_unique<AffineWorkQueue>(
         QueueType::kTimer, Priority::kHigh, "timer"));
     set_policy(make_policy(PolicyConfig{"strict_priority"}));
+
+    // Launch timer coroutine in P4 (timer) queue.
+    // Set TLS so that co_await yield_to(idx_timer_) inside timer_coro_fn
+    // can enqueue the coroutine back to the timer queue even before the
+    // worker loop starts (current_worker() returns null during construction).
+    tls_source_queue_idx = idx_timer_;
+    tls_source_queue = get_queue(idx_timer_);
+    auto timer_coro = timer_coro_fn(this);
+    tls_source_queue_idx = SIZE_MAX;
+    tls_source_queue = nullptr;
+    (void)timer_coro;
 }
 
 void OnlineWorker::submit_engine(WorkItem item) {

@@ -6,6 +6,7 @@
 #include "ring_work_queue.h"
 #include "io/io_backend.h"
 #include "io/io_engine.h"
+#include "timer.h"
 #include <functional>
 #include <optional>
 #include <type_traits>
@@ -97,10 +98,13 @@ public:
 
     size_t default_queue_idx() const noexcept override { return idx_engine_; }
 
+    WorkerTimerState& timer_state() noexcept { return timer_state_; }
+
     std::unique_ptr<io::IIOBackend> io_backend_;
 
 private:
     TaskDispatchMode dispatch_mode_{TaskDispatchMode::kDirect};
+    WorkerTimerState timer_state_;
 };
 
 // ============================================================================

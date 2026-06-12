@@ -1,13 +1,12 @@
 #pragma once
 #include "coro_primitives.h"
+#include "timer.h"
 #include "work_stealing_deque.h"
 #include "adaptive_idle.h"
-#include "ring_work_queue.h"
 #include "local_work_queue.h"
 #include <folly/Executor.h>
 #include <atomic>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <vector>
 #include <string>
@@ -47,6 +46,7 @@ public:
 
         // Stats
         std::atomic<uint64_t> tasks_executed{0};
+        std::atomic<uint64_t> coro_resumes{0};    // coroutine resumes (may yield, count each resume)
         std::atomic<uint64_t> steals_success{0};
         std::atomic<uint64_t> steals_failed{0};
         std::atomic<uint64_t> parks{0};
@@ -63,7 +63,7 @@ public:
 
     // ── Submission ──
 
-    // Submit from any thread (external or worker). Pushes to global queue.
+    // Submit from any thread (external or worker). Pushes to a worker's local deque.
     void add(WorkItem item);
 
     // Route a coroutine handle to a specific worker (affinity resume).
@@ -93,16 +93,14 @@ public:
         return tl_folly_executor_;
     }
 
+    // ── Offline timer wheel ──
+    OfflineTimerWheel& timer_wheel() noexcept { return timer_wheel_; }
+
 private:
     void worker_loop(WorkerState& ws);
 
     Config cfg_;
     std::vector<std::unique_ptr<WorkerState>> workers_;
-
-    // Global submission queue (MPMC ring, all workers + external threads)
-    std::unique_ptr<RingWorkQueue> global_queue_;
-    // Mutex to protect global queue dequeue (RingWorkQueue dequeue is SC-only)
-    std::mutex global_mutex_;
 
     // TLS
     static thread_local size_t tl_worker_id_;
@@ -113,6 +111,11 @@ private:
 
     // NUMA peer lists
     std::vector<std::vector<size_t>> numa_peers_;  // per worker: peer indices
+
+    // ── Offline timer ──
+    OfflineTimerWheel timer_wheel_;
+    std::thread timer_thread_;
+    std::atomic<bool> stop_timer_{false};
 };
 
 }  // namespace storage::runtime
