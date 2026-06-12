@@ -1,94 +1,139 @@
 # Storage Engine
 
-高性能单节点存储引擎，目标：最少核心 → 百万级 IOPS + 微秒尾延迟。
+高性能存储引擎，构建可插拔的多引擎存储资源池。
 
-## Runtime — 用户态协程线程库
+## 设计哲学
 
-C++20 无阻塞协程运行时，对齐 pthread 语义，零成本迁移多线程代码。
+在低延迟时代，**尽量抛弃一切多余动作**——同步开销、系统调用开销、不必要的数据拷贝。以此为出发点，构建基础、可高度配置的 Runtime 框架。
 
-### 只需一个头文件
+## 架构
+
+```
+RPC Layer (DPDK/RDMA) → Consistency Layer → Pluggable Engine → IO Backend (io_uring/libaio/SPDK)
+                                    ↕
+                          Execution Runtime (C++20 Coroutines)
+                          ├── Online: P0→P1→P2 priority scheduler
+                          └── Offline: NUMA-aware work-stealing executor
+```
+
+### Runtime — 用户态协程线程库
+
+整个技术栈的底层执行引擎。C++20 无阻塞协程运行时，对齐 pthread 语义。
+
+```cpp
+#include "runtime/coro_api.h"
+coro_thread thr([] { do_work(); });
+co_await thr.join();
+```
+
+**双调度模型**：
+
+| 模型 | 场景 | 调度 |
+|------|------|------|
+| **Online** | IO 密集型 (NIC, NVMe) | 每 worker 优先级队列 P0→P1→P2→P4 |
+| **Offline** | 计算密集型 (压缩, 编码) | Chase-Lev 工作偷取, NUMA 感知 |
+
+**挂起原理**：所有 `co_await` 走 C++20 三步协议。handle 存入队列/链表/堆，Scheduler 或 timer 恢复。
+
+| 原语 | 用途 |
+|------|------|
+| `yield()` | 让出 CPU, 回优先级队列 |
+| `Baton` | 协程间信号, 支持 wait_for(timeout) |
+| `Mutex` / `Semaphore` | 互斥/计数, 亲和性路由 |
+| `co_sleep_for` | 定时挂起, Online/Offline 自动路由 |
+| `coro_thread` | pthread 等价, join/detach/yield |
+
+**pthread 迁移**：`pthread_create` → `coro_thread`, `pthread_mutex_lock` → `co_await mtx.co_lock()`, `sleep` → `co_await co_sleep_for()`。详见 [协程使用指南](docs/2026-06-10/26-coroutine-usage.md)。
+
+**禁止**：`folly::coro::blockingWait`, `std::mutex`, `std::condition_variable` — 破坏协作调度。
+
+### 核心模块
+
+| 模块 | 状态 | 说明 |
+|------|------|------|
+| **Runtime** | ✔ | Online (priority scheduler) + Offline (work-stealing) |
+| **IO Adapter** | ✔ | io_uring (SQPOLL) / libaio / SPDK 可插拔后端 |
+| **Coroutine Primitives** | ✔ | yield, baton, mutex, semaphore, coro_thread |
+| **SPDK Backend** | ✔ | 用户态 NVMe 驱动 (代码就绪，待环境) |
+| **Perf & Trace** | ⏳ | 三级计数 + 直方图 |
+| **RPC Layer** | ⏳ | DPDK TCP / RDMA |
+| **Pluggable Engine** | ⏳ | LSM / B+Tree |
+
+## 快速开始
+
+### 迁移线程代码
 
 ```cpp
 #include "runtime/coro_api.h"
 using namespace storage::runtime;
 
-// 像用线程一样用协程
+// std::thread → coro_thread
 coro_thread thr([] { do_work(); });
 co_await thr.join();
 
-// 互斥、信号量、睡眠 —— 全是协程原语
+// std::mutex → AffinityMutex
 coro_mutex_t mtx;
 co_await mtx.co_lock();
 
+// sem_t → AffinitySemaphore
 coro_sem_t sem(4);
 co_await sem.acquire();
 
-co_await co_sleep_for(100ms);
-co_await yield();
+// std::this_thread::yield() → this_coro::yield()
+co_await this_coro::yield();
 ```
 
-### 挂起原理
+### 协程原语 (coro_primitives.h)
 
-所有 `co_await` 走 C++20 三步协议：`await_ready()` → `await_suspend(handle)` → `await_resume()`。handle 存入队列/链表/堆，由 Scheduler 或 timer 恢复。
+| 原语 | 用途 | 用法 |
+|------|------|------|
+| `yield()` | 挂起→回来源队列 | `co_await yield()` |
+| `yield_to(idx)` | 挂起→指定队列 | `co_await yield_to(QueueType::kDiskIO)` |
+| `AffinityBaton` | 协程间信号 | `co_await baton` / `baton.post(route)` |
+| `AffinityMutex` | 互斥锁 | `co_await mtx.co_lock()` / `std::lock_guard` |
+| `AffinitySemaphore` | 计数信号量 | `co_await sem.acquire()` / `sem.release()` |
+| `coro_thread` | std::thread 等价 | `coro_thread thr(fn)` / `co_await thr.join()` |
+| `co_submit<R>(fn)` | 提交+返回结果 | `auto r = co_await w.co_submit<int>(fn)` |
 
-| 原语 | 挂起方式 | 恢复时机 |
-|------|---------|---------|
-| `yield()` | `WorkItem` 入调度队列 | Scheduler 轮询到该队列 |
-| `Baton` | CAS 入侵入式等待链表 | `post()` → RouteFunc → 入队 |
-| `co_sleep_for` | 入 timer 小顶堆 | 到期 → pop → 入原优先级队列 |
-| `Mutex` | CAS 入等待链表 | `unlock()` → 出队 → resume |
-| `Semaphore` | 堆分配 WaiterNode | `release()` → 出队 → resume |
+### Online vs Offline
 
-### 双调度模型
+| 特性 | Online | Offline |
+|------|--------|---------|
+| 调度 | P0→P1→P2 优先级队列 | Chase-Lev 工作偷取 |
+| 提交 | `submit_engine()` 到当前 worker | `group.submit()` 到全局队列 |
+| 亲和性 | AffinityBaton → enqueue_affine(P0) | AffinityBaton → add_to_worker(id, handle) |
+| IO | 支持 io_uring/libaio/SPDK | 纯 CPU 任务 |
+| 创建 | `worker_spawn(cfg)` | `OfflineWorkerGroup(cfg)` |
 
-**Online** — 每 Worker 独立优先级队列：
-```
-drain_p0 (affine) → P1 (IO poll) → P2 (engine) → P4 (timer)
-```
+## Performance (NVMe QD=1, Solidigm P41 Plus 1TB)
 
-**Offline** — Chase-Lev 工作偷取：
-```
-affine_queue → local_deque(LIFO) → steal peer(FIFO) → park
-```
+| Backend | P50 | RIOP | 模型 |
+|---------|-----|------|------|
+| io_uring (SQPOLL) | 17.9μs | 29.2K | 非阻塞, flush=66ns |
+| libaio | 17.8μs | 33.3K | 内联 submit |
+| fio io_uring | 47μs | 18.7K | 阻塞 submit_and_wait |
 
-### pthread 迁移对照
+- P1 IO 收割协程: Scheduler 周期 328ns (drain_p0 41ns + drain_all 289ns)
+- SQPOLL 内核线程: idle=0 紧密自旋, CPU2 绑定
+- QD=4 SLC cache 命中: 10-17μs P50
+- 详细分析: [docs/2026-06-10/24-io-perf-analysis.md](docs/2026-06-10/24-io-perf-analysis.md)
+- 原语设计: [docs/2026-06-10/25-coroutine-primitives.md](docs/2026-06-10/25-coroutine-primitives.md)
 
-| pthread | 本框架 |
-|---------|--------|
-| `pthread_create` | `coro_thread thr(fn, args)` |
-| `pthread_join` | `co_await thr.join()` |
-| `pthread_detach` | `thr.detach()` |
-| `pthread_mutex_lock` | `co_await mtx.co_lock()` |
-| `sem_wait/sem_post` | `co_await sem.acquire()` / `sem.release()` |
-| `sleep` | `co_await co_sleep_for(10ms)` |
-| `pthread_yield` | `co_await yield()` |
-| `pthread_self` | `this_coro::get_id()` |
-
-### 禁止
-
-`folly::coro::blockingWait`, `std::mutex`, `std::condition_variable` — 破坏协作调度模型。
-
-### 性能锚点
-
-- 调度周期: 328ns
-- Baton 往返: 47ns  
-- IO flush (SQPOLL): 66ns
-- 协程挂起/恢复: <200ns
-
-### IO 后端
-
-io_uring (SQPOLL+idle=0) / libaio / SPDK (代码就绪)。QD=1 P50 17-28μs，与 fio 阻塞模型持平。
-
-### 构建
+## Benchmarking
 
 ```bash
-cmake -B build && cmake --build build && ctest --test-dir build
+# 框架多 QD 矩阵
+./scripts/bench.sh
+
+# fio 对照
+./scripts/fio_compare.sh /mnt/nvme_test/fio_test 1G io_uring
 ```
 
-### 文档
+## 构建
 
-- [协程使用指南](docs/2026-06-10/26-coroutine-usage.md)
-- [线程模型概述](docs/2026-06-10/28-threading-model.md)
-- [IO 性能分析](docs/2026-06-10/24-io-perf-analysis.md)
-- [亲和性队列架构](docs/2026-06-10/29-affine-architecture.md)
-- [IO 优化与定时器](docs/2026-06-10/27-optimization-design.md)
+```bash
+cmake -B build && cmake --build build
+ctest --test-dir build
+```
+
+要求: GCC 13+, CMake 3.20+, folly, hwloc, GTest, liburing, libaio
