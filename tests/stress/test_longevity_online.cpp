@@ -182,7 +182,7 @@ TEST(Longevity, OnlineIO_20min) {
     printf("  Time(s) | IOPS(K) | P50(us) | P99(us) | Avg(us)\n");
     printf("  --------|---------|---------|---------|--------\n");
 
-    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 1) {
+    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 20) {
         if (steady_clock::now() > hard_deadline) {
             auto elapsed_s = duration_cast<seconds>(steady_clock::now() - t0).count();
             printf("  HARD TIMEOUT at %lds — forcing exit\n", elapsed_s);

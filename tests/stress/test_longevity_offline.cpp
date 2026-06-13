@@ -129,7 +129,7 @@ TEST(Longevity, OfflineCPU_20min) {
     printf("  -----|---------|----|----|----|----|----|----|----|----\n");
     fflush(stdout);
 
-    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 1) {
+    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 20) {
         std::this_thread::sleep_for(seconds(10));
 
         double   secs = duration_cast<seconds>(

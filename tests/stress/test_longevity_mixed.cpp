@@ -281,7 +281,7 @@ TEST(Longevity, MixedOnlineOffline_20min) {
     printf("  Time(s) | Rate(K) | Total(K) | Baton# | Mutex#\n");
     printf("  --------|---------|----------|--------|--------\n");
 
-    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 1) {
+    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 20) {
         std::this_thread::sleep_for(seconds(10));
         auto now = steady_clock::now();
         auto cur = completed.value();

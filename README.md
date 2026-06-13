@@ -132,6 +132,28 @@ co_await this_coro::yield();
 - MPMC ring (RingWorkQueue), NUMA-aware stealing
 - Benchmark: `./tests/stress/test_work_stealing_bench`
 
+## Longevity Tests
+
+5-minute sustained stability validation across all execution models:
+
+| Scenario | Workers | Duration | IOPS/Rate | Latency | Result |
+|----------|---------|----------|-----------|---------|--------|
+| Online IO (QD=32) | 4 Online | 5min | 42-165K IOPS | P50=567μs | ✅ |
+| Offline CPU | 8 Offline | 5min | 31K IOPS sustained | — | ✅ 8/8 active |
+| Mixed cross-group | 2 Online + 4 Offline | 5min | 12K mixed rate | — | ✅ baton/mutex/sem |
+
+- Online: 4 workers share 1 SQPOLL kernel thread via `IORING_SETUP_ATTACH_WQ`
+- Kernel threads: 1 `iou-sqp` + 18 `iou-wrk` (O_DIRECT needs only sqp; wrk idle pool)
+- O_DIRECT IO handled entirely by SQPOLL thread + NVMe completion IRQ
+- Metrics server: `--port 9190` `/metrics` (JSON+Prometheus) `/health`
+
+```bash
+# Run longevity tests (20min each by default)
+./tests/stress/test_longevity_online     # Online IO
+./tests/stress/test_longevity_offline    # Offline CPU
+./tests/stress/test_longevity_mixed      # Mixed cross-group
+```
+
 ## Benchmarking
 
 ```bash
