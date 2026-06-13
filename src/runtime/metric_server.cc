@@ -20,6 +20,19 @@ MetricServer::MetricServer(const Config& cfg) : cfg_(cfg) {
     });
 
     add_endpoint("/health", []() { return "{\"status\":\"ok\"}"; });
+
+    add_endpoint("/", []() {
+        std::ostringstream oss;
+        oss << "{\n";
+        oss << "  \"service\": \"storage-engine metrics\",\n";
+        oss << "  \"endpoints\": {\n";
+        oss << "    \"/metrics\": \"JSON format\",\n";
+        oss << "    \"/metrics?format=prometheus\": \"Prometheus format\",\n";
+        oss << "    \"/health\": \"health check\"\n";
+        oss << "  }\n";
+        oss << "}\n";
+        return oss.str();
+    });
 }
 
 MetricServer::~MetricServer() { stop(); }

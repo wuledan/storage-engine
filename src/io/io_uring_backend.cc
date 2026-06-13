@@ -35,18 +35,19 @@ IOUringBackend::IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn r
             params.wq_fd = it->second;
         } else {
             // This ring becomes the primary for this group
-            params.flags |= IORING_SETUP_SQPOLL;
-            params.flags |= IORING_SETUP_SQ_AFF;
-            params.sq_thread_idle = 0;
-            params.sq_thread_cpu = 2;
             group_ring_fds_[cfg.sq_poll_group] = -1;  // placeholder, set after init
         }
-    } else {
-        // Own kernel thread (N=M)
+    }
+
+    // Rings that are NOT secondary rings in a shared group need their own
+    // SQPOLL kernel thread + performance flags. Secondary rings attach to
+    // the primary's workqueue and don't need their own thread.
+    if (cfg.sq_poll_group < 0 || !(params.flags & IORING_SETUP_ATTACH_WQ)) {
         params.flags |= IORING_SETUP_SQPOLL;
-        params.flags |= IORING_SETUP_SQ_AFF;     // 需要 sq_thread_cpu 生效
-        params.sq_thread_idle = 0;               // 永不 idle，紧密自旋
-        params.sq_thread_cpu = 2;               // CPU2 — dedicated SQPOLL core
+        params.flags |= IORING_SETUP_SQ_AFF;
+        params.flags |= IORING_SETUP_SINGLE_ISSUER;   // reduce kernel worker threads
+        params.sq_thread_idle = 0;
+        params.sq_thread_cpu = 2;
     }
 
     int ret = io_uring_queue_init_params(queue_depth_, &ring_, &params);
@@ -56,7 +57,10 @@ IOUringBackend::IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn r
             + std::to_string(-ret) + " (" + strerror(-ret) + ")");
     }
 
-    // If this ring is the primary for a group, store the actual ring fd
+    // If this ring is the primary for a group, store the ring fd so secondary
+    // rings can attach to this ring's workqueue via IORING_SETUP_ATTACH_WQ.
+    // NOTE: on newer kernels params.wq_fd would carry the io-wq fd, but on
+    // kernel 6.17 the kernel accepts ring_fd directly for ATTACH_WQ.
     if (cfg.sq_poll_group >= 0 && !(params.flags & IORING_SETUP_ATTACH_WQ)) {
         group_ring_fds_[cfg.sq_poll_group] = ring_.ring_fd;
     }

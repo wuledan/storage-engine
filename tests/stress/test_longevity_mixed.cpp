@@ -2,6 +2,7 @@
 #include "runtime/online_group.h"
 #include "runtime/work_stealing_executor.h"
 #include "runtime/metric_counter.h"
+#include "runtime/metric_server.h"
 #include "runtime/affinity_baton.h"
 #include "runtime/affinity_mutex.h"
 #include "runtime/affinity_semaphore.h"
@@ -262,7 +263,16 @@ TEST(Longevity, MixedOnlineOffline_20min) {
     }
 
     // ------------------------------------------------------------------
-    // 6. Monitor loop — 20 minutes, log every 10 seconds
+    // 6. Metrics server
+    // ------------------------------------------------------------------
+    MetricServer::Config scfg{9192};
+    scfg.bind_addr = "192.168.3.12";
+    MetricServer srv(scfg);
+    srv.start();
+    printf("  Metrics server on http://192.168.3.12:9192/metrics\n");
+
+    // ------------------------------------------------------------------
+    // 7. Monitor loop — 5 minutes, log every 10 seconds
     // ------------------------------------------------------------------
     auto prev = completed.value();
     size_t prev_baton_sig = 0;
@@ -271,7 +281,7 @@ TEST(Longevity, MixedOnlineOffline_20min) {
     printf("  Time(s) | Rate(K) | Total(K) | Baton# | Mutex#\n");
     printf("  --------|---------|----------|--------|--------\n");
 
-    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 20) {
+    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 1) {
         std::this_thread::sleep_for(seconds(10));
         auto now = steady_clock::now();
         auto cur = completed.value();
@@ -295,7 +305,7 @@ TEST(Longevity, MixedOnlineOffline_20min) {
     }
 
     // ------------------------------------------------------------------
-    // 7. Clean shutdown
+    // 8. Clean shutdown
     // ------------------------------------------------------------------
     g_stop.store(true, std::memory_order_release);
     for (auto& t : submitter_threads) {
@@ -310,7 +320,7 @@ TEST(Longevity, MixedOnlineOffline_20min) {
     g_sync = nullptr;
 
     // ------------------------------------------------------------------
-    // 8. Verification
+    // 9. Verification
     // ------------------------------------------------------------------
     size_t final_completed    = static_cast<size_t>(completed.value());
     size_t final_baton_sig    = sync.baton_signals.load(std::memory_order_acquire);

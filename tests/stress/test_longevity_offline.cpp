@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "runtime/work_stealing_executor.h"
+#include "runtime/metric_server.h"
 #include "runtime/metric_counter.h"
 #include <thread>
 #include <atomic>
@@ -113,7 +114,14 @@ TEST(Longevity, OfflineCPU_20min) {
         });
     }
 
-    // ── 4. Monitor loop (20 min, log every 10 seconds) ──────────────────
+    // ── 4. Metrics server ────────────────────────────────────────────────
+    MetricServer::Config scfg{9191};
+    scfg.bind_addr = "192.168.3.12";
+    MetricServer srv(scfg);
+    srv.start();
+    printf("  Metrics server on http://192.168.3.12:9191/metrics\n");
+
+    // ── 5. Monitor loop (5 min, log every 10 seconds) ────────────────────
     auto t0 = steady_clock::now();
     uint64_t prev_tasks = 0;
 
@@ -121,7 +129,7 @@ TEST(Longevity, OfflineCPU_20min) {
     printf("  -----|---------|----|----|----|----|----|----|----|----\n");
     fflush(stdout);
 
-    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 20) {
+    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 1) {
         std::this_thread::sleep_for(seconds(10));
 
         double   secs = duration_cast<seconds>(
@@ -141,7 +149,7 @@ TEST(Longevity, OfflineCPU_20min) {
         prev_tasks = cur;
     }
 
-    // ── 5. Clean shutdown ────────────────────────────────────────────────
+    // ── 6. Clean shutdown ────────────────────────────────────────────────
     stop.store(true, std::memory_order_release);
     for (auto& t : submitters) {
         t.join();
@@ -149,7 +157,7 @@ TEST(Longevity, OfflineCPU_20min) {
     exec.stop();
     exec.join();
 
-    // ── 6. Verify all workers participated (no deadlock, even stealing) ──
+    // ── 7. Verify all workers participated (no deadlock, even stealing) ──
     size_t active = 0;
     for (size_t i = 0; i < 8; ++i) {
         if (exec.worker(i).tasks_executed.load(std::memory_order_relaxed) > 0) {

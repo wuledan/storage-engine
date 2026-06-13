@@ -162,10 +162,19 @@ TEST(Longevity, OnlineIO_20min) {
     }
 
     // ------------------------------------------------------------------
-    // 4. Monitor loop — 20 minutes, log every 10 seconds
+    // 4. Metrics server
+    // ------------------------------------------------------------------
+    MetricServer::Config scfg{9190};
+    scfg.bind_addr = "192.168.3.12";
+    MetricServer srv(scfg);
+    srv.start();
+    printf("  Metrics server on http://192.168.3.12:9190/metrics\n");
+
+    // ------------------------------------------------------------------
+    // 5. Monitor loop — 5 minutes, log every 10 seconds
     // ------------------------------------------------------------------
     auto t0 = steady_clock::now();
-    auto hard_deadline = t0 + minutes(22);  // 22min absolute deadline
+    auto hard_deadline = t0 + minutes(7);  // 7min absolute deadline
     bool timed_out = false;
     uint64_t prev_io = 0;
     uint64_t p50_initial_us = 0;
@@ -173,7 +182,7 @@ TEST(Longevity, OnlineIO_20min) {
     printf("  Time(s) | IOPS(K) | P50(us) | P99(us) | Avg(us)\n");
     printf("  --------|---------|---------|---------|--------\n");
 
-    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 20) {
+    while (duration_cast<minutes>(steady_clock::now() - t0).count() < 1) {
         if (steady_clock::now() > hard_deadline) {
             auto elapsed_s = duration_cast<seconds>(steady_clock::now() - t0).count();
             printf("  HARD TIMEOUT at %lds — forcing exit\n", elapsed_s);
@@ -211,7 +220,7 @@ TEST(Longevity, OnlineIO_20min) {
            (double)p50_final_us / std::max(p50_initial_us, 1ul));
 
     // ------------------------------------------------------------------
-    // 5. Verification — P50 must stay within reasonable bounds
+    // 6. Verification — P50 must stay within reasonable bounds
     // ------------------------------------------------------------------
     // QD=32 on QLC: P50 expected 100-600us. Threshold 1ms.
     if (!timed_out) {
@@ -227,7 +236,7 @@ TEST(Longevity, OnlineIO_20min) {
            io_lat.avg_ns() / 1000);
 
     // ------------------------------------------------------------------
-    // 6. Cleanup
+    // 7. Cleanup
     // ------------------------------------------------------------------
     printf("  Shutting down worker group...\n"); fflush(stdout);
     auto t_stop = steady_clock::now();

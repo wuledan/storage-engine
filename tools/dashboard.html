@@ -42,7 +42,7 @@
 <div class="error" id="error-msg"></div>
 
 <script>
-const METRICS_URL = 'http://localhost:9090/metrics';
+const METRICS_URL = 'http://192.168.3.12:9190/metrics';
 let latencyChart = null;
 
 function safeNum(v, def) { const n = Number(v); return isNaN(n) ? def : n; }
