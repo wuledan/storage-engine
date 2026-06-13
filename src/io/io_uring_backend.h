@@ -6,7 +6,6 @@
 #include <array>
 #include <vector>
 #include <unordered_map>
-#include <mutex>
 #include <cstring>
 
 namespace storage::io {
@@ -38,7 +37,6 @@ public:
 
 private:
     static std::unordered_map<int, int> group_ring_fds_;  // group_id → primary ring fd
-    static std::mutex group_mutex_;
     // 实际填充 SQE（内部方法，不缓冲）
     void submit_impl(IORequest req);
 

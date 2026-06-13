@@ -16,7 +16,6 @@ storage::runtime::metric::MetricLatency g_io_latency;
 }
 
 std::unordered_map<int, int> IOUringBackend::group_ring_fds_;
-std::mutex IOUringBackend::group_mutex_;
 
 IOUringBackend::IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route)
     : queue_depth_(cfg.queue_depth) {
@@ -29,7 +28,6 @@ IOUringBackend::IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn r
 
     if (cfg.sq_poll_group >= 0) {
         // Shared group: find or create the primary ring
-        std::lock_guard<std::mutex> lk(group_mutex_);
         auto it = group_ring_fds_.find(cfg.sq_poll_group);
         if (it != group_ring_fds_.end()) {
             // Secondary ring in this group: attach to the primary
@@ -60,20 +58,16 @@ IOUringBackend::IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn r
 
     // If this ring is the primary for a group, store the actual ring fd
     if (cfg.sq_poll_group >= 0 && !(params.flags & IORING_SETUP_ATTACH_WQ)) {
-        std::lock_guard<std::mutex> lk(group_mutex_);
         group_ring_fds_[cfg.sq_poll_group] = ring_.ring_fd;
     }
 }
 
 IOUringBackend::~IOUringBackend() {
     // If this ring was the primary for a group, remove the entry
-    {
-        std::lock_guard<std::mutex> lk(group_mutex_);
-        for (auto it = group_ring_fds_.begin(); it != group_ring_fds_.end(); ++it) {
-            if (it->second == ring_.ring_fd) {
-                group_ring_fds_.erase(it);
-                break;
-            }
+    for (auto it = group_ring_fds_.begin(); it != group_ring_fds_.end(); ++it) {
+        if (it->second == ring_.ring_fd) {
+            group_ring_fds_.erase(it);
+            break;
         }
     }
     io_uring_queue_exit(&ring_);
