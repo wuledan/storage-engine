@@ -11,7 +11,7 @@ std::unique_ptr<IIOBackend> IOEngine::create(
     IIOBackend::RouteFn route_fn) {
 
     if (cfg.type == "io_uring") {
-        return std::make_unique<IOUringBackend>(cfg.queue_depth, std::move(route_fn));
+        return std::make_unique<IOUringBackend>(cfg, std::move(route_fn));
     }
     if (cfg.type == "libaio") {
         return std::make_unique<LibaioBackend>(cfg.queue_depth, std::move(route_fn));

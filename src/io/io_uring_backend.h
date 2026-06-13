@@ -1,9 +1,12 @@
 #pragma once
+#include "io_engine.h"
 #include "io_backend.h"
 #include "runtime/types.h"
 #include <liburing.h>
 #include <array>
 #include <vector>
+#include <unordered_map>
+#include <mutex>
 #include <cstring>
 
 namespace storage::io {
@@ -15,7 +18,7 @@ public:
         uint64_t max_age_iterations{3};    // 最大等待轮数
     };
 
-    explicit IOUringBackend(size_t queue_depth = 256, IIOBackend::RouteFn route = {});
+    explicit IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route = {});
     ~IOUringBackend() override;
 
     std::string_view name() const noexcept override { return "io_uring"; }
@@ -34,6 +37,8 @@ public:
     void set_buffer_config(const BufferConfig& cfg) { buf_cfg_ = cfg; }
 
 private:
+    static std::unordered_map<int, int> group_ring_fds_;  // group_id → primary ring fd
+    static std::mutex group_mutex_;
     // 实际填充 SQE（内部方法，不缓冲）
     void submit_impl(IORequest req);
 

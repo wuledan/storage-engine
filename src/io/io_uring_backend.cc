@@ -15,28 +15,67 @@ storage::runtime::metric::MetricCounter g_io_completed;
 storage::runtime::metric::MetricLatency g_io_latency;
 }
 
-IOUringBackend::IOUringBackend(size_t queue_depth, IIOBackend::RouteFn route)
-    : queue_depth_(queue_depth) {
+std::unordered_map<int, int> IOUringBackend::group_ring_fds_;
+std::mutex IOUringBackend::group_mutex_;
+
+IOUringBackend::IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route)
+    : queue_depth_(cfg.queue_depth) {
     set_route_fn(std::move(route));
     pending_.reserve(queue_depth_ * 2);
     pending_.resize(queue_depth_ * 2);
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
-    params.flags |= IORING_SETUP_SQPOLL;
-    params.flags |= IORING_SETUP_SQ_AFF;     // 需要 sq_thread_cpu 生效
-    // params.flags |= IORING_SETUP_IOPOLL;     // DISABLED for A/B test
-    params.sq_thread_idle = 0;               // 永不 idle，紧密自旋
-    params.sq_thread_cpu = 2;               // CPU2 — dedicated SQPOLL core
+
+    if (cfg.sq_poll_group >= 0) {
+        // Shared group: find or create the primary ring
+        std::lock_guard<std::mutex> lk(group_mutex_);
+        auto it = group_ring_fds_.find(cfg.sq_poll_group);
+        if (it != group_ring_fds_.end()) {
+            // Secondary ring in this group: attach to the primary
+            params.flags |= IORING_SETUP_ATTACH_WQ;
+            params.wq_fd = it->second;
+        } else {
+            // This ring becomes the primary for this group
+            params.flags |= IORING_SETUP_SQPOLL;
+            params.flags |= IORING_SETUP_SQ_AFF;
+            params.sq_thread_idle = 0;
+            params.sq_thread_cpu = 2;
+            group_ring_fds_[cfg.sq_poll_group] = -1;  // placeholder, set after init
+        }
+    } else {
+        // Own kernel thread (N=M)
+        params.flags |= IORING_SETUP_SQPOLL;
+        params.flags |= IORING_SETUP_SQ_AFF;     // 需要 sq_thread_cpu 生效
+        params.sq_thread_idle = 0;               // 永不 idle，紧密自旋
+        params.sq_thread_cpu = 2;               // CPU2 — dedicated SQPOLL core
+    }
+
     int ret = io_uring_queue_init_params(queue_depth_, &ring_, &params);
     if (ret < 0) {
         throw std::runtime_error(
             std::string("[io] IORingSetupFailed: io_uring_queue_init failed, ret=")
             + std::to_string(-ret) + " (" + strerror(-ret) + ")");
     }
+
+    // If this ring is the primary for a group, store the actual ring fd
+    if (cfg.sq_poll_group >= 0 && !(params.flags & IORING_SETUP_ATTACH_WQ)) {
+        std::lock_guard<std::mutex> lk(group_mutex_);
+        group_ring_fds_[cfg.sq_poll_group] = ring_.ring_fd;
+    }
 }
 
 IOUringBackend::~IOUringBackend() {
+    // If this ring was the primary for a group, remove the entry
+    {
+        std::lock_guard<std::mutex> lk(group_mutex_);
+        for (auto it = group_ring_fds_.begin(); it != group_ring_fds_.end(); ++it) {
+            if (it->second == ring_.ring_fd) {
+                group_ring_fds_.erase(it);
+                break;
+            }
+        }
+    }
     io_uring_queue_exit(&ring_);
 }
 

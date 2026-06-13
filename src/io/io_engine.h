@@ -10,6 +10,7 @@ struct IOBackendConfig {
     size_t queue_depth{256};
     size_t max_file_size{0};         // SPDK bdev 大小
     std::string bdev_name;           // SPDK block device name
+    int sq_poll_group{-1};           // -1 = own kernel thread (N=M), >=0 = shared group ID
 };
 
 class IOEngine {
