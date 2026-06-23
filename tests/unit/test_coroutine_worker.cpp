@@ -2,8 +2,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
-#include <folly/coro/Task.h>
-#include <folly/coro/BlockingWait.h>
+#include "runtime/coro_task.h"
 #include "runtime/online_worker.h"
 #include "runtime/affinity_baton.h"
 

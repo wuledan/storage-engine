@@ -7,7 +7,6 @@
 #include "object_pool.h"
 #include "memory_pool.h"
 #include "affinity_baton.h"
-#include <folly/Executor.h>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -29,7 +28,7 @@ struct WorkerStats {
     uint64_t total_idles{0};
 };
 
-class Worker : public folly::Executor {
+class Worker {
 public:
     struct Config {
         uint32_t cpu_id{1};
@@ -60,17 +59,16 @@ public:
     // Subclasses override to provide cross-worker routing.
     // Base: assumes single-worker (current worker = target).
     virtual adapt::RouteFunc make_route_func() {
-        return [this](size_t /*worker_id*/, std::coroutine_handle<> h) {
-            this->enqueue_affine(h);
+        return adapt::RouteFunc{
+            [](void* ctx, size_t /*worker_id*/, std::coroutine_handle<> h) {
+                static_cast<Worker*>(ctx)->enqueue_affine(h);
+            },
+            this
         };
     }
 
     WorkerPerf& perf() { return perf_; }
     void set_perf_level(PerfLevel lv) { perf_.set_level(lv); }
-
-    // ── folly::Executor ──
-    // quant::WorkStealingExecutor 模式: Task final_suspend 调度回 worker
-    void add(folly::Func func) override;
 
     // 由子类设置 affine 队列索引
     void set_affine_q_idx(size_t idx) { affine_q_idx_ = idx; }
@@ -84,13 +82,12 @@ protected:
     virtual void on_worker_start() {}
 
     virtual void enqueue_affine(std::coroutine_handle<> h) {
-        (void)h;
-    }
-
-    // 重载：接受函数指针回调（Executor 路径）
-    virtual void enqueue_affine(void(*fn)(void*), void* arg) {
-        fn(arg);
-        delete static_cast<folly::Func*>(arg);
+        // Base class should never be called — must be overridden by subclass.
+        // If this fires, the caller is on a non-Worker thread or a Worker
+        // without an affine queue (e.g. base Worker used directly).
+        assert(false && "enqueue_affine called on base Worker — no affine queue");
+        // Fallback: resume inline to avoid deadlock, but this violates affinity
+        h.resume();
     }
 
     adapt::QuantMemoryResource& memory_resource() { return *mem_pool_; }

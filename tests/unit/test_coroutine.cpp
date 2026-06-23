@@ -2,8 +2,6 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
-#include <folly/coro/Task.h>
-#include <folly/coro/BlockingWait.h>
 #include "runtime/scheduler.h"
 #include "runtime/strict_priority_policy.h"
 #include "runtime/adaptive_idle.h"
@@ -24,8 +22,6 @@ TEST(CoroutineTest, SchedulerRunAsCoroutine) {
     scheduler.register_queue(std::make_unique<LocalWorkQueue>(
         QueueType::kEngine, Priority::kMedium, "test"));
 
-    // 验证 run() 返回 Task<void> 且能正确编译
-    [[maybe_unused]] auto task = scheduler.run();
     SUCCEED();
 }
 
@@ -39,13 +35,10 @@ TEST(CoroutineTest, BlockingWaitAndStop) {
     scheduler.register_queue(std::make_unique<LocalWorkQueue>(
         QueueType::kEngine, Priority::kMedium, "test"));
 
-    auto task = scheduler.run();
-    std::thread stopper([&scheduler] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        scheduler.request_stop();
-    });
-    folly::coro::blockingWait(std::move(task));
-    stopper.join();
+    std::thread t([&]() { scheduler.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    scheduler.request_stop();
+    t.join();
     SUCCEED();
 }
 
@@ -71,13 +64,10 @@ TEST(CoroutineTest, TasksExecuteInCoroutine) {
     };
     raw_q->push_batch(items, 3);
 
-    auto task = scheduler.run();
-    std::thread stopper([&scheduler] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        scheduler.request_stop();
-    });
-    folly::coro::blockingWait(std::move(task));
-    stopper.join();
+    std::thread t([&]() { scheduler.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    scheduler.request_stop();
+    t.join();
 
     EXPECT_EQ(g_coro_count.load(), 111);
     EXPECT_EQ(scheduler.stats().total_tasks_executed, 3u);

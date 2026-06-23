@@ -54,8 +54,8 @@ static void uneven_load_task() {
 // to avoid silently losing tasks when the queue overflows.
 static std::atomic<int64_t> g_submit_inflight{0};
 
-// Single submitter thread: repeatedly submits tasks via folly::Func (so lambdas
-// with captures are allowed — they get wrapped in a coroutine internally).
+// Single submitter thread: repeatedly submits tasks via add(std::function)
+// (lambdas with captures are allowed — they get wrapped in a coroutine internally).
 static void submitter(WorkStealingExecutor* exec, BenchStats* stats,
                       size_t total_tasks, int work_us) {
     for (size_t i = 0; i < total_tasks && stats->running.load(); ++i) {
@@ -69,7 +69,7 @@ static void submitter(WorkStealingExecutor* exec, BenchStats* stats,
         g_submit_inflight.fetch_add(1, std::memory_order_relaxed);
 
         auto t0 = high_resolution_clock::now();
-        exec->add(folly::Func{[stats, t0, work_us]() {
+        exec->add(std::function<void()>{[stats, t0, work_us]() {
             auto t1 = high_resolution_clock::now();
             auto lat = duration_cast<nanoseconds>(t1 - t0).count();
             stats->total_latency_ns.fetch_add(lat, std::memory_order_relaxed);

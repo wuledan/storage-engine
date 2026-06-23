@@ -8,7 +8,7 @@ namespace storage::io {
 
 class LibaioBackend : public IIOBackend {
 public:
-    explicit LibaioBackend(size_t queue_depth = 256, IIOBackend::RouteFn route = {});
+    explicit LibaioBackend(size_t queue_depth = 256);
     ~LibaioBackend() override;
 
     std::string_view name() const noexcept override { return "libaio"; }

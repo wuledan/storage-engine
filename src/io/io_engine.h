@@ -16,8 +16,7 @@ struct IOBackendConfig {
 class IOEngine {
 public:
     static std::unique_ptr<IIOBackend> create(
-        const IOBackendConfig& cfg,
-        IIOBackend::RouteFn route_fn);
+        const IOBackendConfig& cfg);
 };
 
 }  // namespace storage::io

@@ -7,17 +7,16 @@
 namespace storage::io {
 
 std::unique_ptr<IIOBackend> IOEngine::create(
-    const IOBackendConfig& cfg,
-    IIOBackend::RouteFn route_fn) {
+    const IOBackendConfig& cfg) {
 
     if (cfg.type == "io_uring") {
-        return std::make_unique<IOUringBackend>(cfg, std::move(route_fn));
+        return std::make_unique<IOUringBackend>(cfg);
     }
     if (cfg.type == "libaio") {
-        return std::make_unique<LibaioBackend>(cfg.queue_depth, std::move(route_fn));
+        return std::make_unique<LibaioBackend>(cfg.queue_depth);
     }
     if (cfg.type == "spdk") {
-        return std::make_unique<SPDKBackend>(cfg, std::move(route_fn));
+        return std::make_unique<SPDKBackend>(cfg);
     }
 
     throw std::runtime_error("Unknown IO backend type: " + cfg.type);

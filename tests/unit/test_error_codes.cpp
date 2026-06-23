@@ -44,16 +44,23 @@ TEST(ErrorCodesTest, UniqueCodes) {
 // 测试4: IOBackend 通过 factory 创建
 // ============================================================================
 TEST(ErrorCodesTest, IOBackendAvailable) {
-    auto b = IOEngine::create({"io_uring", 64}, nullptr);
+    auto b = IOEngine::create({"io_uring", 64});
     ASSERT_NE(b, nullptr);
     EXPECT_EQ(b->name(), "io_uring");
+}
+
+namespace {
+struct ErrorTestCtx { std::atomic<bool>* done; };
+void error_test_callback(void* ctx, IOCompletion) {
+    static_cast<ErrorTestCtx*>(ctx)->done->store(true);
+}
 }
 
 // ============================================================================
 // 测试5: 无效 fd 的 IO 提交不导致 crash
 // ============================================================================
 TEST(ErrorCodesTest, InvalidFDHandled) {
-    auto b = IOEngine::create({"io_uring", 64}, nullptr);
+    auto b = IOEngine::create({"io_uring", 64});
     ASSERT_NE(b, nullptr);
 
     IORequest req;
@@ -63,15 +70,16 @@ TEST(ErrorCodesTest, InvalidFDHandled) {
     req.len = 0;
 
     std::atomic<bool> done{false};
-    req.callback = [&done](IOCompletion) { done.store(true); };
+    ErrorTestCtx ctx{&done};
+    req.callback_fn = error_test_callback;
+    req.callback_ctx = &ctx;
     b->submit(std::move(req));
 
     IOCompletion out[64];
     for (int i = 0; i < 100 && !done.load(); ++i) {
         size_t n = b->poll(out, 64);
-        for (size_t j = 0; j < n; ++j) {
-            if (out[j].callback) out[j].callback(out[j]);
-        }
+        // Callbacks invoked inside poll()
+        (void)n;
         if (n == 0) std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 

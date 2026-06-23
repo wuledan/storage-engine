@@ -51,6 +51,54 @@ struct BenchCtx {
 };
 static BenchCtx g_ctx;
 
+namespace {
+
+// ── Helper callback contexts (after BenchCtx, which they reference) ──
+
+// For bench_producer: one per in-flight IO
+struct BenchProducerCtx {
+    AffinityBaton*       baton;
+    std::atomic<size_t>* pending;
+    BenchCtx*            ctx;
+    uint64_t             t0_rdtsc;
+    size_t               op;
+};
+
+void bench_producer_cb(void* vctx, IOCompletion) {
+    auto* c = static_cast<BenchProducerCtx*>(vctx);
+    uint64_t delta = __builtin_ia32_rdtsc() - c->t0_rdtsc;
+    if (c->op < c->ctx->lats->size()) (*c->ctx->lats)[c->op] = delta;
+    if (c->pending->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        c->ctx->baton_rt = __builtin_ia32_rdtsc();
+        c->baton->post();
+    }
+}
+
+// For FioAlignedPipeline: one per in-flight IO
+struct FioCtx {
+    std::vector<uint64_t>* lats;
+    uint64_t               t0_rdtsc;
+    size_t                 op;
+};
+
+void fio_cb(void* vctx, IOCompletion) {
+    auto* c = static_cast<FioCtx*>(vctx);
+    (*c->lats)[c->op] = __builtin_ia32_rdtsc() - c->t0_rdtsc;
+}
+
+// For SingleIOTimeline: simple done flag
+struct DoneFlag { std::atomic<bool>* done; };
+void done_flag_cb(void* vctx, IOCompletion) {
+    static_cast<DoneFlag*>(vctx)->done->store(true);
+}
+
+// For BatonRoundTrip: post baton
+void post_baton_cb(void* vctx, IOCompletion) {
+    static_cast<AffinityBaton*>(vctx)->post();
+}
+
+}  // anonymous namespace
+
 struct ProducerCoro {
     struct promise_type {
         ProducerCoro get_return_object() {
@@ -79,6 +127,7 @@ static void bench_producer() {
             AffinityBaton baton;
             std::atomic<size_t> pending{0};
             std::vector<uint64_t> t0s(ctx.qd);
+            std::vector<BenchProducerCtx> fctxs(ctx.qd);
 
             size_t batch_start = ctx.next_batch->fetch_add(ctx.qd);
 
@@ -94,16 +143,16 @@ static void bench_producer() {
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                 }
 
-                IORequest req{
-                    IORequest::kWrite, ctx.fd, op * 4096ULL, ctx.buf, 4096, 0,
-                    [&baton, &pending, &ctx, &t0s, q, op](IOCompletion) {
-                        uint64_t delta = __builtin_ia32_rdtsc() - t0s[q];
-                        if (op < ctx.lats->size()) (*ctx.lats)[op] = delta;
-                        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                            ctx.baton_rt = __builtin_ia32_rdtsc();
-                            baton.post(ctx.w->make_route_func());
-                        }
-                    }};
+                fctxs[q] = BenchProducerCtx{&baton, &pending, &ctx, t0s[q], op};
+
+                IORequest req;
+                req.op = IORequest::kWrite;
+                req.fd = ctx.fd;
+                req.offset = op * 4096ULL;
+                req.buf = ctx.buf;
+                req.len = 4096;
+                req.callback_fn = bench_producer_cb;
+                req.callback_ctx = &fctxs[q];
                 uint64_t t_sub0 = __builtin_ia32_rdtsc();
                 ctx.w->io_backend()->submit(std::move(req));
                 uint64_t t_sub1 = __builtin_ia32_rdtsc();
@@ -296,6 +345,8 @@ TEST(BenchmarkIO, FioAlignedPipeline) {
             std::chrono::steady_clock::now().time_since_epoch()).count();
 
         std::vector<uint64_t> t0s(qd);
+        std::vector<FioCtx> fctxs_fio;
+        fctxs_fio.reserve(N);
         std::atomic<size_t> pending{0};
 
         uint64_t t_submit_total = 0, t_wait_total = 0, t_proc_total = 0;
@@ -311,10 +362,16 @@ TEST(BenchmarkIO, FioAlignedPipeline) {
                 has_work = true;
                 t0s[q] = __builtin_ia32_rdtsc();
                 pending.fetch_add(1, std::memory_order_relaxed);
-                IORequest req{IORequest::kWrite, fd, op * 4096ULL, buf, 4096, 0,
-                    [&lats, &t0s, q, op](IOCompletion) {
-                        lats[op] = __builtin_ia32_rdtsc() - t0s[q];
-                    }};
+                FioCtx fctx{&lats, t0s[q], op};
+                fctxs_fio.push_back(fctx);
+                IORequest req;
+                req.op = IORequest::kWrite;
+                req.fd = fd;
+                req.offset = op * 4096ULL;
+                req.buf = buf;
+                req.len = 4096;
+                req.callback_fn = fio_cb;
+                req.callback_ctx = &fctxs_fio.back();
                 backend->submit(std::move(req));
             }
             if (pending.load(std::memory_order_acquire) == 0) break;
@@ -441,9 +498,16 @@ TEST(BenchmarkIO, SingleIOTimeline) {
     // 简化为: 直接循环测 P50
     for (int i = 0; i < N; ++i) {
         std::atomic<bool> done{false};
+        DoneFlag dflag{&done};
         uint64_t t0 = __builtin_ia32_rdtsc();
-        IORequest rq{IORequest::kWrite, fd, (uint64_t)i*4096, b, 4096, 0,
-            [&done](IOCompletion) { done.store(true); }};
+        IORequest rq;
+        rq.op = IORequest::kWrite;
+        rq.fd = fd;
+        rq.offset = static_cast<uint64_t>(i) * 4096;
+        rq.buf = b;
+        rq.len = 4096;
+        rq.callback_fn = done_flag_cb;
+        rq.callback_ctx = &dflag;
         w.io_backend()->submit(std::move(rq));
         w.io_backend()->flush_submissions();
         while (!done.load()) _mm_pause();
@@ -492,8 +556,14 @@ TEST(BenchmarkIO, BatonRoundTrip) {
         auto child = [&]() -> BatonCoro {
             auto route = w.make_route_func();
             AffinityBaton baton;
-            IORequest rq{IORequest::kWrite, fd, (uint64_t)i*4096, b, 4096, 0,
-                [&baton, &route](IOCompletion c) { baton.post(route); }};
+            IORequest rq;
+            rq.op = IORequest::kWrite;
+            rq.fd = fd;
+            rq.offset = static_cast<uint64_t>(i) * 4096;
+            rq.buf = b;
+            rq.len = 4096;
+            rq.callback_fn = post_baton_cb;
+            rq.callback_ctx = &baton;
             w.io_backend()->submit(std::move(rq));
             w.io_backend()->flush_submissions();
             uint64_t t0 = __builtin_ia32_rdtsc();

@@ -1,12 +1,11 @@
-// memory_pool.h — Tiered memory pool with pmr::memory_resource interface
+// memory_pool.h — Tiered memory pool
 #pragma once
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <coroutine>
 #include <memory>
-#include <memory_resource>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,70 +36,37 @@ struct MemoryPoolStats {
 };
 
 // ── Main memory pool ──
-class QuantMemoryResource : public std::pmr::memory_resource {
+class QuantMemoryResource {  // ← no longer inherits std::pmr::memory_resource
 public:
     explicit QuantMemoryResource(const SmallObjectConfig& cfg = {});
-    ~QuantMemoryResource() override;
+    ~QuantMemoryResource();
 
-    // ── Warmup: pre-allocate memory ──
+    // ── Sync interface (per-Worker, single-threaded, no contention) ──
+    void* allocate(size_t bytes, size_t alignment = alignof(std::max_align_t));
+    void deallocate(void* ptr, size_t bytes, size_t alignment = alignof(std::max_align_t));
+
+    // ── Coroutine interface (per-NUMA shared, needs co_lock in future) ──
+    // TODO: co_allocate/co_deallocate with AffinityMutex co_lock for NUMA pools
+    // For now, these delegate to the sync path since per-Worker is single-threaded.
+
+    // ── Warmup ──
     void warmup(size_t total_bytes);
 
     // ── Stats ──
     MemoryPoolStats stats() const noexcept;
 
-    // ── Reset: return all cached objects but keep underlying blocks ──
+    // ── Reset ──
     void reset() noexcept;
-
-protected:
-    void* do_allocate(size_t bytes, size_t alignment) override;
-    void do_deallocate(void* ptr, size_t bytes, size_t alignment) override;
-    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override;
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-// ── Convenience allocator ──
-template<typename T>
-class QuantAllocator {
-public:
-    using value_type = T;
-
-    explicit QuantAllocator(QuantMemoryResource* mr) noexcept : mr_(mr) {}
-
-    template<typename U>
-    QuantAllocator(const QuantAllocator<U>& other) noexcept : mr_(other.resource()) {}
-
-    T* allocate(size_t n) {
-        return static_cast<T*>(mr_->allocate(n * sizeof(T), alignof(T)));
-    }
-
-    void deallocate(T* ptr, size_t n) noexcept {
-        mr_->deallocate(ptr, n * sizeof(T), alignof(T));
-    }
-
-    QuantMemoryResource* resource() const noexcept { return mr_; }
-
-    bool operator==(const QuantAllocator& other) const noexcept {
-        return mr_ == other.mr_;
-    }
-
-    bool operator!=(const QuantAllocator& other) const noexcept {
-        return mr_ != other.mr_;
-    }
-
-private:
-    QuantMemoryResource* mr_;
-};
-
 // ── Global singleton ──
 QuantMemoryResource& global_memory_resource();
 
-// ── Convenience type aliases ──
-template<typename T>
-using PmrVector = std::pmr::vector<T>;
-
+// ── Convenience ──
 template<typename T, typename... Args>
 std::unique_ptr<T> make_quant(Args&&... args) {
     return std::make_unique<T>(std::forward<Args>(args)...);

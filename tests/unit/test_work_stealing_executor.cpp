@@ -27,9 +27,9 @@ TEST(WorkStealingExecutor, StartStop) {
 }
 
 // ============================================================================
-// Test folly::Executor interface — add(folly::Func) via base class pointer
+// Test add(std::function<void()>) convenience wrapper
 // ============================================================================
-TEST(WorkStealingExecutor, FollyExecutorAdd) {
+TEST(WorkStealingExecutor, CallableAdd) {
     WorkStealingExecutor::Config cfg;
     cfg.num_workers = 2;
     cfg.pin_cpus = false;
@@ -40,9 +40,7 @@ TEST(WorkStealingExecutor, FollyExecutorAdd) {
     constexpr int N = 500;
 
     for (int i = 0; i < N; ++i) {
-        // Dispatch through folly::Executor base class pointer
-        folly::Executor* base = &exec;
-        base->add([&counter] { counter.fetch_add(1, std::memory_order_relaxed); });
+        exec.add([&counter] { counter.fetch_add(1, std::memory_order_relaxed); });
     }
 
     // Wait for all tasks to complete
@@ -56,10 +54,10 @@ TEST(WorkStealingExecutor, FollyExecutorAdd) {
 }
 
 // ============================================================================
-// Test that WorkStealingExecutor::current_folly_executor() returns non-null
+// Test that WorkStealingExecutor::current_executor() returns non-null
 // on worker threads
 // ============================================================================
-TEST(WorkStealingExecutor, CurrentFollyExecutor) {
+TEST(WorkStealingExecutor, CurrentExecutor) {
     WorkStealingExecutor::Config cfg;
     cfg.num_workers = 1;
     cfg.pin_cpus = false;
@@ -69,18 +67,13 @@ TEST(WorkStealingExecutor, CurrentFollyExecutor) {
     std::atomic<bool> checked{false};
 
     exec.add(WorkItem::make_func([]() {
-        // On a WSE worker thread, current_folly_executor() should be non-null
-        EXPECT_NE(WorkStealingExecutor::current_folly_executor(), nullptr);
-        // current_executor() should match
-        EXPECT_EQ(WorkStealingExecutor::current_executor(),
-                  dynamic_cast<WorkStealingExecutor*>(
-                      WorkStealingExecutor::current_folly_executor()));
+        // On a WSE worker thread, current_executor() should be non-null
+        EXPECT_NE(WorkStealingExecutor::current_executor(), nullptr);
     }));
 
-    // Also submit via folly::Executor interface and verify the TLS is set
-    folly::Executor* base = &exec;
-    base->add([&checked] {
-        EXPECT_NE(WorkStealingExecutor::current_folly_executor(), nullptr);
+    // Also submit via add(std::function) and verify TLS
+    exec.add([&checked] {
+        EXPECT_NE(WorkStealingExecutor::current_executor(), nullptr);
         checked.store(true, std::memory_order_release);
     });
 

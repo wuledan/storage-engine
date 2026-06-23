@@ -8,7 +8,6 @@
 #include <memory>
 #include <vector>
 
-#include "affinity_mutex.h"
 #include <mutex>
 
 namespace storage::runtime::adapt {
@@ -48,7 +47,7 @@ public:
 
     // ── Acquire an object ──
     std::shared_ptr<T> acquire() {
-        std::lock_guard<AffinityMutex> lock(impl_->mutex_);
+        std::lock_guard<std::mutex> lock(impl_->mutex_);
 
         // Check if we need to grow
         if (impl_->free_list_.empty()) {
@@ -106,7 +105,7 @@ public:
 
     // ── Warmup ──
     void warmup(size_t count) {
-        std::lock_guard<AffinityMutex> lock(impl_->mutex_);
+        std::lock_guard<std::mutex> lock(impl_->mutex_);
         impl_->grow(count);
     }
 
@@ -121,7 +120,7 @@ public:
     };
 
     Stats stats() const noexcept {
-        std::lock_guard<AffinityMutex> lock(impl_->mutex_);
+        std::lock_guard<std::mutex> lock(impl_->mutex_);
         Stats s;
         s.total_allocated = impl_->capacity_;
         s.total_in_use = impl_->in_use_.load(std::memory_order_relaxed);
@@ -156,7 +155,7 @@ private:
 
         // Return object to pool (called by shared_ptr deleter)
         void return_object(size_t idx) {
-            std::lock_guard<AffinityMutex> lock(mutex_);
+            std::lock_guard<std::mutex> lock(mutex_);
             free_list_.push_back(idx);
             in_use_.fetch_sub(1, std::memory_order_relaxed);
             stats_.release_count.fetch_add(1, std::memory_order_relaxed);
@@ -204,7 +203,7 @@ private:
         };
         AtomicStats stats_;
 
-        mutable AffinityMutex mutex_;
+        mutable std::mutex mutex_;
     };
 
     std::shared_ptr<Impl> impl_;

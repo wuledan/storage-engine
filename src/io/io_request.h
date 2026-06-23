@@ -1,11 +1,13 @@
 #pragma once
 #include <cstdint>
 #include <cstddef>
-#include <functional>
 
 namespace storage::io {
 
-struct IOCompletion;
+struct IOCompletion {
+    uint64_t user_data{0};
+    int64_t result{0};  // 成功: bytes, 失败: -errno
+};
 
 struct IORequest {
     enum Op : uint8_t { kRead, kWrite, kFlush, kTrim };
@@ -17,14 +19,15 @@ struct IORequest {
     size_t len{0};
     uint32_t trace_id{0};
 
-    using Callback = std::function<void(IOCompletion)>;
-    Callback callback;
-};
+    // Callback: function pointer + context (16 bytes, zero heap allocation)
+    using CallbackFn = void(*)(void* ctx, IOCompletion comp);
+    CallbackFn callback_fn = nullptr;
+    void* callback_ctx = nullptr;
 
-struct IOCompletion {
-    uint64_t user_data{0};
-    int64_t result{0};  // 成功: bytes, 失败: -errno
-    IORequest::Callback callback;
+    // Convenience: invoke if callback is set
+    void invoke_callback(IOCompletion comp) {
+        if (callback_fn) callback_fn(callback_ctx, comp);
+    }
 };
 
 }  // namespace storage::io

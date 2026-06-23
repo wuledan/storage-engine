@@ -17,9 +17,8 @@ storage::runtime::metric::MetricLatency g_io_latency;
 
 std::unordered_map<int, int> IOUringBackend::group_ring_fds_;
 
-IOUringBackend::IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route)
+IOUringBackend::IOUringBackend(const IOBackendConfig& cfg)
     : queue_depth_(cfg.queue_depth) {
-    set_route_fn(std::move(route));
     pending_.reserve(queue_depth_ * 2);
     pending_.resize(queue_depth_ * 2);
 
@@ -79,7 +78,8 @@ IOUringBackend::~IOUringBackend() {
 
 // 新 submit: 走缓冲
 void IOUringBackend::submit(IORequest req) {
-    submit_impl(std::move(req));  // 单请求直通，不走缓冲
+    submit_impl(std::move(req));
+    flush_submissions();  // 立即提交 SQE 到内核，避免 IO 请求永久挂起
 }
 
 void IOUringBackend::submit_batch(std::vector<IORequest> requests) {
@@ -99,19 +99,50 @@ void IOUringBackend::submit_batch(std::vector<IORequest> requests) {
 void IOUringBackend::submit_impl(IORequest req) {
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe) {
+        // SQ 环形缓冲区已满：提交所有待处理的 SQE，然后等待 CQE
+        // 以释放 SQ 槽位。
+        //
+        // 注意：在 SQPOLL 模式下，io_uring_submit() 异步唤醒内核线程，
+        // io_uring_wait_cqe() 返回时 khead 不一定已同步推进，
+        // 因此需要循环等待处理 CQE，直到至少一个 SQ 槽位可用。
         io_uring_submit(&ring_);
         pending_sqe_count_ = 0;
-        sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) {
-            if (req.callback) {
-                IOCompletion comp;
-                comp.result = -ENOBUFS;
-                comp.callback = std::move(req.callback);
-                comp.callback(comp);
+
+        // 最多等待 ring_size*2 个 CQE：即使 SQPOLL 线程处理滞后，
+        // 每个 CQE 必然对应一个被消费的 SQE，最终一定能释放槽位。
+        for (int drain_attempts = 0; drain_attempts < (int)(queue_depth_ * 2); ++drain_attempts) {
+            struct io_uring_cqe* cqe = nullptr;
+            int ret = io_uring_wait_cqe(&ring_, &cqe);
+            if (ret == 0 && cqe) {
+                uint64_t idx = reinterpret_cast<uint64_t>(io_uring_cqe_get_data(cqe));
+                if (idx < pending_.size()) {
+                    IOCompletion comp;
+                    comp.result = cqe->res;
+                    comp.user_data = idx;
+                    if (pending_[idx].callback_fn) {
+                        pending_[idx].callback_fn(pending_[idx].callback_ctx, comp);
+                    }
+                    io_uring_cqe_seen(&ring_, cqe);
+                } else {
+                    io_uring_cqe_seen(&ring_, cqe);
+                }
             }
-            return;
+
+            sqe = io_uring_get_sqe(&ring_);
+            if (sqe)
+                goto got_sqe;
         }
+
+        // 耗尽重试次数仍无法获取 SQE → 投递业务错误
+        if (req.callback_fn) {
+            IOCompletion comp;
+            comp.result = -ENOBUFS;
+            req.callback_fn(req.callback_ctx, comp);
+        }
+        return;
     }
+
+got_sqe:
 
     uint64_t idx = submit_count_++;
     if (idx >= pending_.size()) {
@@ -193,7 +224,11 @@ size_t IOUringBackend::poll(IOCompletion* out, size_t max) {
 
         out[count].result = cqe->res;
         out[count].user_data = idx;
-        out[count].callback = std::move(pending_[idx].callback);
+
+        // Invoke callback inline (zero allocation on coroutine frame)
+        if (pending_[idx].callback_fn) {
+            pending_[idx].callback_fn(pending_[idx].callback_ctx, out[count]);
+        }
 
         io_uring_cqe_seen(&ring_, cqe);
         g_io_completed << 1;

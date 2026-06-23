@@ -1,7 +1,0 @@
-add_test([=[BatchSubmitTest.BatchExactQD]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_batch_submit [==[--gtest_filter=BatchSubmitTest.BatchExactQD]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[BatchSubmitTest.BatchExactQD]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[BatchSubmitTest.BatchPartialBuffers]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_batch_submit [==[--gtest_filter=BatchSubmitTest.BatchPartialBuffers]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[BatchSubmitTest.BatchPartialBuffers]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[BatchSubmitTest.SubmitDirectNoBuffer]=]  /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_batch_submit [==[--gtest_filter=BatchSubmitTest.SubmitDirectNoBuffer]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[BatchSubmitTest.SubmitDirectNoBuffer]=]  PROPERTIES WORKING_DIRECTORY /home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set(  test_batch_submit_TESTS BatchSubmitTest.BatchExactQD BatchSubmitTest.BatchPartialBuffers BatchSubmitTest.SubmitDirectNoBuffer)

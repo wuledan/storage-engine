@@ -144,6 +144,26 @@ sanitizer_add(test_longevity_offline)
 include(GoogleTest)
 gtest_discover_tests(test_longevity_offline)
 
+# Pool throughput benchmark (lock-free QuantMemoryResource)
+add_executable(test_pool_bench test_pool_bench.cpp)
+target_link_libraries(test_pool_bench
+    PRIVATE
+        runtime
+        GTest::gtest_main
+        GTest::gtest
+        Threads::Threads
+)
+target_include_directories(test_pool_bench PRIVATE ${FOLLY_INCLUDE_DIR})
+if(FOLLY_BUILD_INCLUDE_DIR)
+    target_include_directories(test_pool_bench PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
+endif()
+sanitizer_add(test_pool_bench)
+include(GoogleTest)
+gtest_discover_tests(test_pool_bench)
+
+# Per-NUMA shared pool multi-thread correctness & scaling tests
+add_stress_test(test_pool_numa test_pool_numa.cpp)
+
 # Mixed online + offline longevity test (20min, 2 online + 4 offline workers, cross-group sync)
 add_executable(test_longevity_mixed test_longevity_mixed.cpp)
 target_link_libraries(test_longevity_mixed

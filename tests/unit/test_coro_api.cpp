@@ -2,8 +2,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
-#include <folly/coro/Task.h>
-#include <folly/coro/BlockingWait.h>
+#include "runtime/coro_task.h"
 #include "runtime/coro_api.h"
 
 using namespace storage::runtime;
@@ -78,7 +77,7 @@ TEST(CoroApi, CoSpawnLambda) {
         co_spawn([&counter]() { counter.fetch_add(1); });
         co_spawn([&counter]() { counter.fetch_add(1); });
     });
-    folly::coro::blockingWait(std::move(task));
+    adapt::blockingWait(std::move(task));
 
     // The spawned tasks are enqueued on the engine.  Wait for them to
     // be processed by the scheduler on the worker thread.
@@ -104,7 +103,7 @@ TEST(CoroApi, CoSubmitReturnsValue) {
     worker_t w = worker_spawn(cfg);
 
     auto task = w->co_submit<int>([] { return 42; });
-    int result = folly::coro::blockingWait(std::move(task));
+    int result = adapt::blockingWait(std::move(task));
     EXPECT_EQ(result, 42);
 
     worker_join(w);
@@ -117,7 +116,7 @@ TEST(CoroApi, CoSubmitReturnsVoid) {
 
     std::atomic<bool> called{false};
     auto task = w->co_submit<void>([&called] { called = true; });
-    folly::coro::blockingWait(std::move(task));
+    adapt::blockingWait(std::move(task));
 
     EXPECT_TRUE(called.load());
     worker_join(w);
@@ -131,7 +130,7 @@ TEST(CoroApi, CoSubmitPropagatesException) {
     auto task = w->co_submit<int>([]() -> int {
         throw std::runtime_error("test error");
     });
-    EXPECT_THROW(folly::coro::blockingWait(std::move(task)), std::runtime_error);
+    EXPECT_THROW(adapt::blockingWait(std::move(task)), std::runtime_error);
 
     worker_join(w);
 }
@@ -228,14 +227,14 @@ TEST(CoroApi, CoroCreateJoinReturnsValue) {
         return c;
     });
 
-    coro_t c = folly::coro::blockingWait(std::move(create_task));
+    coro_t c = adapt::blockingWait(std::move(create_task));
     ASSERT_NE(c, nullptr);
 
     // Join via co_await — suspends the blockingWait coroutine until done.
-    auto join_task = [](coro_t c) -> folly::coro::Task<void*> {
+    auto join_task = [](coro_t c) -> adapt::Task<void*> {
         co_return co_await coro_join(c);
     };
-    void* retval = folly::coro::blockingWait(join_task(c));
+    void* retval = adapt::blockingWait(join_task(c));
     EXPECT_EQ(reinterpret_cast<intptr_t>(retval), 42);
 
     worker_join(w);
@@ -253,13 +252,13 @@ TEST(CoroApi, CoroCreateJoinNullArg) {
         return c;
     });
 
-    coro_t c = folly::coro::blockingWait(std::move(create_task));
+    coro_t c = adapt::blockingWait(std::move(create_task));
     ASSERT_NE(c, nullptr);
 
-    auto join_task = [](coro_t c) -> folly::coro::Task<void*> {
+    auto join_task = [](coro_t c) -> adapt::Task<void*> {
         co_return co_await coro_join(c);
     };
-    void* retval = folly::coro::blockingWait(join_task(c));
+    void* retval = adapt::blockingWait(join_task(c));
     EXPECT_EQ(retval, nullptr);
 
     worker_join(w);
@@ -278,14 +277,14 @@ TEST(CoroApi, CoroCreateJoinNoRetval) {
         return c;
     });
 
-    coro_t c = folly::coro::blockingWait(std::move(create_task));
+    coro_t c = adapt::blockingWait(std::move(create_task));
     ASSERT_NE(c, nullptr);
 
     // Join — discard the return value (should not crash)
-    auto join_task = [](coro_t c) -> folly::coro::Task<void> {
+    auto join_task = [](coro_t c) -> adapt::Task<void> {
         (void)co_await coro_join(c);
     };
-    folly::coro::blockingWait(join_task(c));
+    adapt::blockingWait(join_task(c));
 
     worker_join(w);
 }
@@ -353,7 +352,7 @@ TEST(CoroApi, CoroDetach) {
         return nullptr;
     });
 
-    (void)folly::coro::blockingWait(std::move(create_task));
+    (void)adapt::blockingWait(std::move(create_task));
 
     // Wait for the detached coroutine to complete
     int spins = 0;
@@ -380,7 +379,7 @@ TEST(CoroApi, CoroDetach) {
 //
 // NOTE: coro_join() is co_await-able.  It suspends the calling
 // coroutine via the target coroutine's AffinityBaton.  Outside a
-// coroutine context, wrap it with folly::coro::blockingWait.
+// coroutine context, wrap it with adapt::blockingWait.
 
 TEST(CoroApi, CoroSelfInsideCoroutine) {
     Worker::Config cfg;
@@ -406,14 +405,14 @@ TEST(CoroApi, CoroSelfInsideCoroutine) {
     });
 
     // Get the handle from the worker, join from main thread (safe)
-    coro_t child = folly::coro::blockingWait(std::move(task));
+    coro_t child = adapt::blockingWait(std::move(task));
     ASSERT_NE(child, nullptr);
 
     {
-        auto join_task = [](coro_t c) -> folly::coro::Task<void> {
+        auto join_task = [](coro_t c) -> adapt::Task<void> {
             (void)co_await coro_join(c);
         };
-        folly::coro::blockingWait(join_task(child));
+        adapt::blockingWait(join_task(child));
     }
 
     EXPECT_TRUE(self_is_non_null.load());
@@ -446,14 +445,14 @@ TEST(CoroApi, CoroSelfConsistent) {
     });
 
     // Join from main thread (safe)
-    coro_t created_handle = folly::coro::blockingWait(std::move(task));
+    coro_t created_handle = adapt::blockingWait(std::move(task));
     ASSERT_NE(created_handle, nullptr);
 
     {
-        auto join_task = [](coro_t c) -> folly::coro::Task<void> {
+        auto join_task = [](coro_t c) -> adapt::Task<void> {
             (void)co_await coro_join(c);
         };
-        folly::coro::blockingWait(join_task(created_handle));
+        adapt::blockingWait(join_task(created_handle));
     }
 
     // The handle from coro_self() inside the coroutine should
@@ -473,7 +472,7 @@ TEST(CoroApi, CoroSelfConsistent) {
 // We use a standalone coroutine lambda (not inside co_submit) because
 // co_submit wraps a regular callable, not a coroutine.
 namespace {
-    folly::coro::Task<void> yield_coro_fn(std::atomic<int>* counter) {
+    adapt::Task<void> yield_coro_fn(std::atomic<int>* counter) {
         counter->fetch_add(1, std::memory_order_relaxed);
         // coro_yield() would suspend+re-enqueue; but this coroutine
         // runs on the calling thread without a worker context, so
@@ -519,37 +518,27 @@ TEST(CoroApi, CoroMutexInvalidArgs) {
     ret = coro_mutex_destroy(nullptr);
     EXPECT_EQ(ret, -EINVAL);
 
-    ret = coro_mutex_lock(nullptr);
-    EXPECT_EQ(ret, -EINVAL);
-
+    // coro_mutex_lock() has been removed — use co_await mutex.co_lock()
     ret = coro_mutex_unlock(nullptr);
     EXPECT_EQ(ret, -EINVAL);
 }
 
 TEST(CoroApi, CoroMutexLockUnlock) {
-    Worker::Config cfg;
-    cfg.cpu_id = 0;
-    worker_t w = worker_spawn(cfg);
-
-    // Test mutex inside a coroutine (same worker, safe for spin-lock)
-    auto task = w->co_submit<bool>([]() -> bool {
+    adapt::blockingWait([]() -> adapt::Task<void> {
         coro_mutex_t mutex;
         coro_mutex_init(&mutex, nullptr);
 
-        coro_mutex_lock(&mutex);
+        co_await mutex.co_lock();
         // Critical section
-        coro_mutex_unlock(&mutex);
+        mutex.unlock();
 
         // Lock again to verify state is clean
-        coro_mutex_lock(&mutex);
-        coro_mutex_unlock(&mutex);
+        co_await mutex.co_lock();
+        mutex.unlock();
 
         coro_mutex_destroy(&mutex);
-        return true;
-    });
-    EXPECT_TRUE(folly::coro::blockingWait(std::move(task)));
-
-    worker_join(w);
+        co_return;
+    }());
 }
 
 // ============================================================================
@@ -557,13 +546,7 @@ TEST(CoroApi, CoroMutexLockUnlock) {
 // ============================================================================
 
 TEST(CoroApi, CoroWaitPost) {
-    Worker::Config cfg;
-    cfg.cpu_id = 0;
-    worker_t w = worker_spawn(cfg);
-
-    std::atomic<int> step{0};
-
-    auto task = w->co_submit<void>([&step]() {
+    adapt::blockingWait([]() -> adapt::Task<void> {
         // Use placement new since AffinitySemaphore has no default ctor
         alignas(coro_sem_t) char sem_buf[sizeof(coro_sem_t)];
         auto* sem = reinterpret_cast<coro_sem_t*>(sem_buf);
@@ -571,23 +554,17 @@ TEST(CoroApi, CoroWaitPost) {
 
         // Post from this coroutine
         coro_sem_post(sem);
-        step.store(1, std::memory_order_release);
 
         // Wait (should succeed immediately since count is now 1)
-        coro_sem_wait(sem);
-        step.store(2, std::memory_order_release);
+        co_await sem->acquire();
 
         // Try post/wait cycle again
         coro_sem_post(sem);
-        coro_sem_wait(sem);
-        step.store(3, std::memory_order_release);
+        co_await sem->acquire();
 
         coro_sem_destroy(sem);
-    });
-    folly::coro::blockingWait(std::move(task));
-
-    EXPECT_EQ(step.load(), 3);
-    worker_join(w);
+        co_return;
+    }());
 }
 
 TEST(CoroApi, CoroInvalidArgs) {
@@ -597,9 +574,7 @@ TEST(CoroApi, CoroInvalidArgs) {
     ret = coro_sem_destroy(nullptr);
     EXPECT_EQ(ret, -EINVAL);
 
-    ret = coro_sem_wait(nullptr);
-    EXPECT_EQ(ret, -EINVAL);
-
+    // coro_sem_wait() has been removed — use co_await sem->acquire()
     ret = coro_sem_post(nullptr);
     EXPECT_EQ(ret, -EINVAL);
 }
@@ -627,7 +602,7 @@ TEST(CoroApi, CoroCreateDetachCompletes) {
     });
 
     // Wait for creation
-    coro_t c = folly::coro::blockingWait(std::move(create_task));
+    coro_t c = adapt::blockingWait(std::move(create_task));
     ASSERT_NE(c, nullptr);
 
     // Detach before the coroutine has finished running
@@ -666,7 +641,7 @@ TEST(CoroApi, CoroCreateDetachAfterCompletion) {
         }, &coro_done);
         EXPECT_EQ(ret, 0);
     });
-    folly::coro::blockingWait(std::move(create_task));
+    adapt::blockingWait(std::move(create_task));
     ASSERT_NE(c, nullptr);
 
     // Wait for the coroutine to finish
@@ -708,7 +683,7 @@ TEST(CoroApi, CoroInitialValue) {
         coro_sem_destroy(sem);
         return true;
     });
-    EXPECT_TRUE(folly::coro::blockingWait(std::move(task)));
+    EXPECT_TRUE(adapt::blockingWait(std::move(task)));
 
     worker_join(w);
 }
@@ -718,43 +693,35 @@ TEST(CoroApi, CoroInitialValue) {
 // ============================================================================
 
 TEST(CoroApi, CoroMutexConcurrent) {
-    Worker::Config cfg;
-    cfg.cpu_id = 0;
-    worker_t w = worker_spawn(cfg);
-
     std::atomic<int> shared{0};
 
-    // Use co_spawn + co_submit to create two coroutines that
-    // increment a shared counter under mutex protection
-    auto task = w->co_submit<void>([&shared]() {
+    adapt::blockingWait([&shared]() -> adapt::Task<void> {
         coro_mutex_t mutex;
         coro_mutex_init(&mutex, nullptr);
 
-        // Spawn two tasks that increment under lock
-        auto t1 = [&mutex, &shared]() {
-            coro_mutex_lock(&mutex);
+        // Spawn two tasks that increment under lock (coroutine lambdas)
+        auto t1 = [&mutex, &shared]() -> adapt::Task<void> {
+            co_await mutex.co_lock();
             shared.fetch_add(1, std::memory_order_relaxed);
-            coro_mutex_unlock(&mutex);
+            mutex.unlock();
         };
 
-        auto t2 = [&mutex, &shared]() {
-            coro_mutex_lock(&mutex);
+        auto t2 = [&mutex, &shared]() -> adapt::Task<void> {
+            co_await mutex.co_lock();
             shared.fetch_add(10, std::memory_order_relaxed);
-            coro_mutex_unlock(&mutex);
+            mutex.unlock();
         };
 
-        // Run both inline (same coroutine — no actual concurrency but
+        // Run both sequentially (same coroutine — no actual concurrency but
         // verifies lock/unlock sequence is correct)
-        t1();
-        t2();
+        co_await t1();
+        co_await t2();
 
         EXPECT_EQ(shared.load(), 11);
 
         coro_mutex_destroy(&mutex);
-    });
-    folly::coro::blockingWait(std::move(task));
-
-    worker_join(w);
+        co_return;
+    }());
 }
 
 // ============================================================================
@@ -794,7 +761,7 @@ TEST(CoroThread, SpawnAndJoin) {
         EXPECT_TRUE(thr.joinable());
         // thr destructor called here → detaches the handle
     });
-    folly::coro::blockingWait(std::move(create));
+    adapt::blockingWait(std::move(create));
 
     // Wait for the detached coroutine to complete
     int spins = 0;
@@ -824,7 +791,7 @@ TEST(CoroThread, SpawnAndJoinWithArgs) {
         coro_thread thr(fn, &val, 77);
         EXPECT_TRUE(thr.joinable());
     });
-    folly::coro::blockingWait(std::move(create));
+    adapt::blockingWait(std::move(create));
 
     int spins = 0;
     while (val.load(std::memory_order_acquire) != 77 && spins < 1000) {
@@ -863,7 +830,7 @@ TEST(CoroThread, MoveSemantics) {
         EXPECT_FALSE(t1.joinable());
         EXPECT_EQ(t1.get_id(), nullptr);
     });
-    folly::coro::blockingWait(std::move(create));
+    adapt::blockingWait(std::move(create));
 
     int spins = 0;
     while (val.load(std::memory_order_acquire) != 99 && spins < 1000) {
@@ -888,7 +855,7 @@ TEST(CoroThread, Detach) {
         thr.detach();
         EXPECT_FALSE(thr.joinable());
     });
-    folly::coro::blockingWait(std::move(create));
+    adapt::blockingWait(std::move(create));
 
     int spins = 0;
     while (val.load(std::memory_order_acquire) != 7 && spins < 1000) {
@@ -915,7 +882,7 @@ TEST(CoroThread, DestructorDetaches) {
             EXPECT_TRUE(thr.joinable());
             // destructor called when lambda returns
         });
-        folly::coro::blockingWait(std::move(create));
+        adapt::blockingWait(std::move(create));
     }
 
     int spins = 0;
@@ -943,7 +910,7 @@ TEST(CoroThread, NativeHandle) {
     });
 
     // Just verify we got a non-null handle
-    coro_t handle = folly::coro::blockingWait(std::move(create));
+    coro_t handle = adapt::blockingWait(std::move(create));
     EXPECT_NE(handle, nullptr);
 
     worker_join(w);
@@ -976,7 +943,7 @@ TEST(CoroThread, ThisCoroGetIdInsideCoroutine) {
         }, &id_inside);
         // thr detaches on destruction
     });
-    folly::coro::blockingWait(std::move(create));
+    adapt::blockingWait(std::move(create));
 
     int spins = 0;
     while (id_inside.load(std::memory_order_acquire) == nullptr && spins < 1000) {
@@ -995,33 +962,13 @@ TEST(CoroThread, ThisCoroGetIdInsideCoroutine) {
 // when_all — spawn N tasks, wait for all, collect results
 // ============================================================================
 
-namespace {
-
-// Local coroutine type — initial_suspend = always so it can be
-// submitted to the engine queue, final_suspend = never for auto cleanup.
-struct WhenAllTestCoro {
-    struct promise_type {
-        WhenAllTestCoro get_return_object() {
-            return WhenAllTestCoro{
-                std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-        std::suspend_always initial_suspend() noexcept { return {}; }
-        std::suspend_never  final_suspend()   noexcept { return {}; }
-        void return_void()   noexcept {}
-        void unhandled_exception() noexcept { std::terminate(); }
-    };
-    std::coroutine_handle<promise_type> handle;
-};
-
-}  // namespace
-
 // ═══════════════════════════════════════════════════════════════
 // WhenAll tests
 //
 // These tests use run_busy() mode (busy_poll = true) so the engine
 // queue is drained every tick alongside the timer queue — the
 // persistent timer coroutine on P1 would otherwise starve P2.
-// The WhenAllTestCoro handle is submitted via submit_engine() and
+// The coroutine handle is submitted via submit_engine() and
 // the test spins on an atomic result.
 //
 // WhenAllOne   — single callable, single result
@@ -1039,15 +986,14 @@ TEST(CoroApi, WhenAllOne) {
 
     std::atomic<int> result{0};
 
-    auto coro_fn = [&result]() -> WhenAllTestCoro {
+    auto coro_fn = [&result]() -> adapt::Task<void> {
         auto [v] = co_await when_all([] { return 42; });
         result.store(v, std::memory_order_release);
         co_return;
     };
 
-    WhenAllTestCoro wtc = coro_fn();
-    w->submit_engine(WorkItem::make_coro(wtc.handle));
-    wtc.handle = {};
+    auto wtc = coro_fn();
+    w->submit_engine(WorkItem::make_coro(wtc.release()));
 
     int spins = 0;
     while (result.load(std::memory_order_acquire) != 42 && spins < 2000) {
@@ -1070,7 +1016,7 @@ TEST(CoroApi, WhenAllTwo) {
 
     std::atomic<int> sum{0};
 
-    auto coro_fn = [&sum]() -> WhenAllTestCoro {
+    auto coro_fn = [&sum]() -> adapt::Task<void> {
         auto [a, b] = co_await when_all(
             [] { return 10; },
             [] { return 32; }
@@ -1079,9 +1025,8 @@ TEST(CoroApi, WhenAllTwo) {
         co_return;
     };
 
-    WhenAllTestCoro wtc = coro_fn();
-    w->submit_engine(WorkItem::make_coro(wtc.handle));
-    wtc.handle = {};
+    auto wtc = coro_fn();
+    w->submit_engine(WorkItem::make_coro(wtc.release()));
 
     int spins = 0;
     while (sum.load(std::memory_order_acquire) != 42 && spins < 2000) {
@@ -1104,7 +1049,7 @@ TEST(CoroApi, WhenAllThree) {
 
     std::atomic<int> result{0};
 
-    auto coro_fn = [&result]() -> WhenAllTestCoro {
+    auto coro_fn = [&result]() -> adapt::Task<void> {
         auto [a, b, c] = co_await when_all(
             [] { return 1; },
             [] { return 2; },
@@ -1114,9 +1059,8 @@ TEST(CoroApi, WhenAllThree) {
         co_return;
     };
 
-    WhenAllTestCoro wtc = coro_fn();
-    w->submit_engine(WorkItem::make_coro(wtc.handle));
-    wtc.handle = {};
+    auto wtc = coro_fn();
+    w->submit_engine(WorkItem::make_coro(wtc.release()));
 
     int spins = 0;
     while (result.load(std::memory_order_acquire) != 6 && spins < 2000) {
@@ -1134,7 +1078,7 @@ TEST(CoroApi, WhenAllEmpty) {
     // when_all() with no arguments should return immediately
     // and produce an empty tuple.
     bool ok = false;
-    auto test_fn = [&]() -> folly::coro::Task<void> {
+    auto test_fn = [&]() -> adapt::Task<void> {
         auto t = co_await when_all();
         static_assert(std::tuple_size_v<decltype(t)> == 0,
                       "empty when_all must produce empty tuple");
@@ -1142,6 +1086,6 @@ TEST(CoroApi, WhenAllEmpty) {
     };
     // blockingWait runs the coroutine on the calling thread.
     // when_all(N=0) does not need a worker context (no tasks to spawn).
-    folly::coro::blockingWait(test_fn());
+    adapt::blockingWait(test_fn());
     EXPECT_TRUE(ok);
 }

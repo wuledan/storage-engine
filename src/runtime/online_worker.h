@@ -10,7 +10,7 @@
 #include <functional>
 #include <optional>
 #include <type_traits>
-#include <folly/coro/Task.h>
+#include "coro_task.h"
 
 namespace storage::runtime {
 
@@ -37,7 +37,7 @@ public:
     // The callable runs on the worker's thread.  The caller's coroutine
     // suspends until the callable completes, then resumes with the result.
     template <typename R, typename F>
-    folly::coro::Task<R> co_submit(F&& func);
+    adapt::Task<R> co_submit(F func);  // by value — coroutine params must not be references
 
     // 向 affine queue 投递协程句柄
     void enqueue_affine(std::coroutine_handle<> h) override;
@@ -84,9 +84,9 @@ public:
     io::IIOBackend* io_backend() { return io_backend_.get(); }
 
     // 协程友好的 IO API
-    folly::coro::Task<io::IOCompletion> co_read(
+    adapt::Task<io::IOCompletion> co_read(
         int fd, uint64_t offset, void* buf, size_t len);
-    folly::coro::Task<io::IOCompletion> co_write(
+    adapt::Task<io::IOCompletion> co_write(
         int fd, uint64_t offset, const void* buf, size_t len);
 
     // 队列索引（在构造函数中注册，公开供外部轮询器和测试使用）
@@ -123,7 +123,7 @@ private:
 // which would dangle once the closure goes out of scope.
 //
 template <typename R, typename F>
-folly::coro::Task<R> OnlineWorker::co_submit(F&& func) {
+adapt::Task<R> OnlineWorker::co_submit(F func) {
     struct VoidTag {};
     using ResultType = std::conditional_t<std::is_void_v<R>, VoidTag, R>;
 
@@ -133,35 +133,19 @@ folly::coro::Task<R> OnlineWorker::co_submit(F&& func) {
         adapt::AffinityBaton baton;
     };
 
-    auto state = std::make_shared<SharedState>();
-    auto route = make_route_func();
+    // SharedState lives directly on co_submit's coroutine frame —
+    // zero heap allocation.  The engine-work coroutine receives a raw
+    // pointer, which is valid because this coroutine is suspended at
+    // co_await state.baton until the engine work completes.
+    SharedState state;
 
-    // ── Engine-work coroutine type ──
-    //   initial_suspend = always  : submitted via handle to engine queue
-    //   final_suspend   = never   : frame auto-destroyed after co_return;
-    //                               the handle is valid only while the
-    //                               coroutine body runs (inside execute()),
-    //                               and the queue does not need it afterwards.
-    struct EngineWork {
-        struct promise_type {
-            EngineWork get_return_object() {
-                return EngineWork{
-                    std::coroutine_handle<promise_type>::from_promise(*this)};
-            }
-            std::suspend_always initial_suspend() noexcept { return {}; }
-            std::suspend_never  final_suspend()   noexcept { return {}; }
-            void return_void()   noexcept {}
-            void unhandled_exception() noexcept { std::terminate(); }
-        };
-        std::coroutine_handle<promise_type> handle;
-    };
-
-    // Generic lambda (no captures) — the callable, state, and route are
+    // Generic lambda (no captures) — the callable and state pointer are
     // stored as coroutine function parameters in the coroutine frame.
     // This avoids the dangling-capture problem.
+    // The route is no longer passed explicitly — each waiter saves its
+    // own route in the baton node via get_current_route() in await_suspend.
     auto make_engine_work = [](auto callable,
-                               std::shared_ptr<SharedState> st,
-                               adapt::RouteFunc rt) -> EngineWork {
+                               SharedState* st) -> adapt::Task<void> {
         try {
             if constexpr (std::is_void_v<R>) {
                 callable();
@@ -172,33 +156,34 @@ folly::coro::Task<R> OnlineWorker::co_submit(F&& func) {
         } catch (...) {
             st->exception = std::current_exception();
         }
-        st->baton.post(rt);
+        st->baton.post();  // Uses each waiter's own saved route
         co_return;
     };
 
+    // NOTE: func is taken by value (not forwarding-reference) because
+    // co_submit is a coroutine — forwarding-reference parameters would
+    // dangle once the original argument is destroyed before the coroutine
+    // resumes from its initial suspend.
+
     // Build the coroutine — body does NOT run yet (initial_suspend == always).
-    // Pass copies so the shared state / route survive for the co_submit body.
-    EngineWork ew = make_engine_work(
-        std::forward<F>(func), state, route);
+    // Pass a raw pointer to the embedded SharedState.
+    auto ew = make_engine_work(
+        std::move(func), &state);
 
     // Submit the handle to the engine queue.
-    submit_engine(WorkItem::make_coro(ew.handle));
-
-    // Release ownership — the queue now "owns" the handle; final_suspend /
-    // never will auto-destroy the frame after the body runs.
-    ew.handle = {};
+    submit_engine(WorkItem::make_coro(ew.release()));
 
     // Wait for completion.
-    co_await state->baton;
+    co_await state.baton;
 
-    if (state->exception) {
-        std::rethrow_exception(state->exception);
+    if (state.exception) {
+        std::rethrow_exception(state.exception);
     }
 
     if constexpr (std::is_void_v<R>) {
         co_return;
     } else {
-        co_return std::move(*state->result);
+        co_return std::move(*state.result);
     }
 }
 

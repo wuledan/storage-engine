@@ -1,5 +1,0 @@
-if(EXISTS "/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_local_queue[1]_tests.cmake")
-  include("/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_local_queue[1]_tests.cmake")
-else()
-  add_test(test_local_queue_NOT_BUILT test_local_queue_NOT_BUILT)
-endif()

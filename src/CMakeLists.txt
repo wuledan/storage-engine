@@ -21,6 +21,6 @@ if(SPDK_FOUND)
 endif()
 
 target_link_libraries(runtime PUBLIC
-    Folly::folly Hwloc::hwloc Threads::Threads event
+    Hwloc::hwloc Threads::Threads event
     ${LIBURING} ${LIBAIO} ${SPDK_LIBS})
 sanitizer_add(runtime)

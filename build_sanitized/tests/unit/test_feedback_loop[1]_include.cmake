@@ -1,5 +1,0 @@
-if(EXISTS "/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_feedback_loop[1]_tests.cmake")
-  include("/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_feedback_loop[1]_tests.cmake")
-else()
-  add_test(test_feedback_loop_NOT_BUILT test_feedback_loop_NOT_BUILT)
-endif()

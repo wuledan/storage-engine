@@ -3,27 +3,23 @@
 namespace storage::runtime {
 
 AffineWorkQueue::AffineWorkQueue(QueueType type, Priority priority, std::string name,
-                                 size_t /*capacity*/)
-    : type_(type), priority_(priority), name_(std::move(name)) {}
+                                 size_t capacity)
+    : queue_(capacity), type_(type), priority_(priority), name_(std::move(name)) {}
 
 void AffineWorkQueue::enqueue(WorkItem item) noexcept {
-    queue_.enqueue(std::move(item));
+    queue_.enqueue(item);
 }
 
 bool AffineWorkQueue::try_dequeue(WorkItem& item) noexcept {
-    return queue_.try_dequeue(item);
+    return queue_.dequeue(item);
 }
 
 size_t AffineWorkQueue::try_dequeue_batch(WorkItem* items, size_t max_count) noexcept {
-    size_t count = 0;
-    while (count < max_count && queue_.try_dequeue(items[count])) {
-        ++count;
-    }
-    return count;
+    return queue_.dequeue_bulk(items, max_count);
 }
 
 size_t AffineWorkQueue::approx_count() const noexcept {
-    return queue_.size();
+    return queue_.count();
 }
 
 }  // namespace storage::runtime

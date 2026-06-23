@@ -73,8 +73,8 @@ static void online_sync_task() {
     CrossSync* sync = g_sync;
     if (!sync) return;
 
-    // 1. Mutex: try_lock with backoff
-    while (!sync->mutex.try_lock()) {
+    // 1. Mutex: non-blocking try via co_lock().await_ready()
+    while (!sync->mutex.co_lock().await_ready()) {
         std::this_thread::yield();
     }
     sync->mutex_acquisitions.fetch_add(1, std::memory_order_relaxed);
@@ -113,8 +113,8 @@ static void offline_sync_task() {
     }
     sync->sem_acquires.fetch_add(1, std::memory_order_relaxed);
 
-    // 3. Lock mutex
-    while (!sync->mutex.try_lock()) {
+    // 3. Lock mutex (non-blocking try)
+    while (!sync->mutex.co_lock().await_ready()) {
         std::this_thread::yield();
     }
     sync->mutex_acquisitions.fetch_add(1, std::memory_order_relaxed);
@@ -198,11 +198,9 @@ TEST(Longevity, MixedOnlineOffline_20min) {
     CrossSync sync;
     g_sync = &sync;   // point global for captureless task functions
 
-    // Set route on mutex + semaphore so that the offline executor can
-    // wake waiters on their original worker thread.
-    RouteFunc offline_route = offline.make_route_func();
-    sync.mutex.set_route(offline_route);
-    sync.sem.set_route(offline_route);
+    // Route is no longer set explicitly — each waiter saves its own
+    // route via get_current_route() in await_suspend, so the offline
+    // executor automatically routes waiters to their original worker.
 
     // ------------------------------------------------------------------
     // 4. Metrics

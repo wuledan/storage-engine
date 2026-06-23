@@ -48,7 +48,7 @@ public:
     //   cfg.bdev_name   → PCI address (e.g. "0000:5f:00.0")
     //   cfg.queue_depth → NVMe queue depth
     //   cfg.max_file_size → namespace ID (if > 0 and ≤ UINT32_MAX)
-    explicit SPDKBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route = {});
+    explicit SPDKBackend(const IOBackendConfig& cfg);
     ~SPDKBackend() override;
 
     std::string_view name() const noexcept override { return "spdk"; }

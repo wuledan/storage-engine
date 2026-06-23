@@ -1,41 +1,76 @@
 #include <gtest/gtest.h>
+#include "runtime/coro_task.h"
 #include "runtime/affinity_mutex.h"
-#include <mutex>  // for std::lock_guard, std::unique_lock
 
 using namespace storage::runtime::adapt;
 
-TEST(AffinityMutex, StdLockGuard) {
+// ── co_scoped_lock() RAII guard ──
+
+TEST(AffinityMutex, ScopedLockGuard) {
     AffinityMutex mtx;
-    {
-        std::lock_guard<AffinityMutex> guard(mtx);
-        // Critical section
-    }
-    // Should not deadlock
+    blockingWait([&]() -> Task<void> {
+        {
+            auto guard = co_await mtx.co_scoped_lock();
+            // Critical section
+        }
+        // Should not deadlock (guard destroyed, mutex unlocked)
+        co_return;
+    }());
 }
 
-TEST(AffinityMutex, StdUniqueLock) {
+// ── Scoped lock ownership / unlock / re-lock ──
+
+TEST(AffinityMutex, ScopedLockOwnership) {
     AffinityMutex mtx;
-    std::unique_lock<AffinityMutex> lock(mtx);
-    EXPECT_TRUE(lock.owns_lock());
-    lock.unlock();
-    EXPECT_FALSE(lock.owns_lock());
-    lock.lock();
-    EXPECT_TRUE(lock.owns_lock());
+    blockingWait([&]() -> Task<void> {
+        AffinityScopedLock lock = co_await mtx.co_scoped_lock();
+        EXPECT_NE(lock.mtx, nullptr);  // owns lock
+
+        lock.unlock();
+        EXPECT_EQ(lock.mtx, nullptr);  // no longer owns lock
+
+        // Re-acquire
+        lock = co_await mtx.co_scoped_lock();
+        EXPECT_NE(lock.mtx, nullptr);  // owns lock again
+        co_return;
+    }());
 }
+
+// ── Non-blocking try-lock via LockAwaiter::await_ready() ──
+// LockAwaiter::await_ready() uses a CAS to acquire the lock without
+// suspending — it is the coroutine-friendly equivalent of try_lock().
 
 TEST(AffinityMutex, TryLock) {
     AffinityMutex mtx;
-    EXPECT_TRUE(mtx.try_lock());
-    EXPECT_FALSE(mtx.try_lock());  // already locked
+
+    // First attempt should succeed (CAS from 0 → kLockedFlag)
+    auto awaiter1 = mtx.co_lock();
+    EXPECT_TRUE(awaiter1.await_ready());
+
+    // Second attempt should fail (already locked)
+    auto awaiter2 = mtx.co_lock();
+    EXPECT_FALSE(awaiter2.await_ready());
+
     mtx.unlock();
-    EXPECT_TRUE(mtx.try_lock());
+
+    // Third attempt should succeed after unlock
+    auto awaiter3 = mtx.co_lock();
+    EXPECT_TRUE(awaiter3.await_ready());
     mtx.unlock();
 }
 
+// ── Deferred locking: default-construct guard, then acquire ──
+
 TEST(AffinityMutex, DeferLock) {
     AffinityMutex mtx;
-    std::unique_lock<AffinityMutex> lock(mtx, std::defer_lock);
-    EXPECT_FALSE(lock.owns_lock());
-    lock.lock();
-    EXPECT_TRUE(lock.owns_lock());
+    blockingWait([&]() -> Task<void> {
+        // Default-constructed AffinityScopedLock owns nothing
+        AffinityScopedLock guard;
+        EXPECT_EQ(guard.mtx, nullptr);
+
+        // Now acquire
+        guard = co_await mtx.co_scoped_lock();
+        EXPECT_NE(guard.mtx, nullptr);
+        co_return;
+    }());
 }

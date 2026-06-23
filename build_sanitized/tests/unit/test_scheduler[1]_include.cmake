@@ -1,5 +1,0 @@
-if(EXISTS "/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_scheduler[1]_tests.cmake")
-  include("/home/wuledan/work/proj/storage-engine/build_sanitized/tests/unit/test_scheduler[1]_tests.cmake")
-else()
-  add_test(test_scheduler_NOT_BUILT test_scheduler_NOT_BUILT)
-endif()

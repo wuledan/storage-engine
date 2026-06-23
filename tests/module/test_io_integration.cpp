@@ -14,9 +14,16 @@ using namespace storage::io;
 // ── Global bridge for captureless callbacks ──
 static std::atomic<bool> g_io_done{false};
 static std::atomic<int64_t> g_io_result{0};
-static void io_done_callback(IOCompletion c) {
+static void io_done_callback(void* /*ctx*/, IOCompletion c) {
     g_io_result.store(c.result);
     g_io_done.store(true);
+}
+
+namespace {
+struct BatchCtx { std::atomic<size_t>* completed; };
+void batch_callback(void* ctx, IOCompletion /*c*/) {
+    static_cast<BatchCtx*>(ctx)->completed->fetch_add(1);
+}
 }
 
 // ============================================================================
@@ -62,7 +69,8 @@ TEST(IOIntegrationTest, SchedulerPollsIO) {
     req.offset = 0;
     req.buf = buf;
     req.len = strlen(buf);
-    req.callback = io_done_callback;
+    req.callback_fn = io_done_callback;
+    req.callback_ctx = nullptr;
     w.io_backend()->submit(std::move(req));
 
     // Scheduler 的 poll 循环会自动收割 IO 完成
@@ -100,6 +108,7 @@ TEST(IOIntegrationTest, MultipleConcurrentIO) {
     std::atomic<size_t> completed{0};
     char buf[32] = "batch_io_data";
 
+    BatchCtx bctx{&completed};
     for (size_t i = 0; i < N; ++i) {
         IORequest req;
         req.op = IORequest::kWrite;
@@ -107,7 +116,8 @@ TEST(IOIntegrationTest, MultipleConcurrentIO) {
         req.offset = static_cast<uint64_t>(i) * 32;
         req.buf = buf;
         req.len = 32;
-        req.callback = [&completed](IOCompletion) { completed.fetch_add(1); };
+        req.callback_fn = batch_callback;
+        req.callback_ctx = &bctx;
         w.io_backend()->submit(std::move(req));
     }
 

@@ -17,7 +17,7 @@ public:
         uint64_t max_age_iterations{3};    // 最大等待轮数
     };
 
-    explicit IOUringBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route = {});
+    explicit IOUringBackend(const IOBackendConfig& cfg);
     ~IOUringBackend() override;
 
     std::string_view name() const noexcept override { return "io_uring"; }

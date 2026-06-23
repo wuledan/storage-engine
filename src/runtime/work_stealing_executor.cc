@@ -1,6 +1,7 @@
 #include "work_stealing_executor.h"
 #include "worker_registry.h"
 #include "metric_counter.h"
+#include "coro_task.h"
 #include <hwloc.h>
 #include <algorithm>
 #include <cstdlib>
@@ -10,7 +11,6 @@ namespace storage::runtime {
 
 thread_local size_t WorkStealingExecutor::tl_worker_id_ = SIZE_MAX;
 thread_local WorkStealingExecutor* WorkStealingExecutor::tl_executor_ = nullptr;
-thread_local folly::Executor* WorkStealingExecutor::tl_folly_executor_ = nullptr;
 
 namespace {
 std::atomic<size_t> g_add_counter{0};
@@ -221,31 +221,13 @@ void WorkStealingExecutor::join() {
     }
 }
 
-void WorkStealingExecutor::add(folly::Func func) {
-    // Wrap the folly::Func in a coroutine so we can submit it via WorkItem::make_coro.
-    // The coroutine body simply calls the function, final_suspend returns never,
-    // so the frame self-destructs after execution.
-    struct FollyTask {
-        struct promise_type {
-            FollyTask get_return_object() {
-                return FollyTask{
-                    std::coroutine_handle<promise_type>::from_promise(*this)};
-            }
-            std::suspend_always initial_suspend() noexcept { return {}; }
-            std::suspend_never  final_suspend()   noexcept { return {}; }
-            void return_void()   noexcept {}
-            void unhandled_exception() noexcept { std::terminate(); }
-        };
-        std::coroutine_handle<promise_type> handle;
-    };
-
-    // Generic lambda with func as a coroutine function parameter (no captures)
-    auto task = [](folly::Func f) -> FollyTask {
+void WorkStealingExecutor::add(std::function<void()> func) {
+    // Wrap the callable in a coroutine so we can submit it via WorkItem::make_coro.
+    auto task = [](std::function<void()> f) -> adapt::Task<void> {
         f();
         co_return;
     }(std::move(func));
-
-    add(WorkItem::make_coro(task.handle));
+    add(WorkItem::make_coro(task.release()));
 }
 
 void WorkStealingExecutor::add(WorkItem item) {
@@ -268,8 +250,11 @@ void WorkStealingExecutor::add_to_worker(size_t worker_id, std::coroutine_handle
 }
 
 adapt::RouteFunc WorkStealingExecutor::make_route_func() {
-    return [this](size_t worker_id, std::coroutine_handle<> h) {
-        this->add_to_worker(worker_id, h);
+    return adapt::RouteFunc{
+        [](void* ctx, size_t worker_id, std::coroutine_handle<> h) {
+            static_cast<WorkStealingExecutor*>(ctx)->add_to_worker(worker_id, h);
+        },
+        this
     };
 }
 
@@ -277,7 +262,6 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
     // Set up TLS
     tl_worker_id_ = ws.id;
     tl_executor_ = this;
-    tl_folly_executor_ = this;  // folly::Executor TLS for coro integration
     adapt::detail::get_current_worker_id = []() -> size_t { return tl_worker_id_; };
     tls_source_queue_idx = SIZE_MAX;
     tls_source_queue = nullptr;

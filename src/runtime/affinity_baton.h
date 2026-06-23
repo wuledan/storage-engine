@@ -14,19 +14,27 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <memory>
 
 namespace storage::runtime::adapt {
 
 // Duration alias matching runtime::Duration (steady_clock::duration)
 using Duration = std::chrono::steady_clock::duration;
 
-// RouteFunc: routes a coroutine handle to the specified worker.
-//   worker_id: target worker's ID (from WaiterNode.worker_id)
-//   handle:    coroutine to resume on that worker
-// The implementation must deliver `handle` to the scheduler of worker `worker_id`.
-using RouteFunc = std::function<void(size_t worker_id, std::coroutine_handle<>)>;
+// RouteFunc: lightweight function pointer + context (16 bytes, zero heap alloc).
+// Encodes how to resume a coroutine on a specific worker thread.
+struct RouteFunc {
+    void (*fn)(void* ctx, size_t worker_id, std::coroutine_handle<> h) = nullptr;
+    void* ctx = nullptr;
+
+    void operator()(size_t worker_id, std::coroutine_handle<> h) const {
+        if (fn) fn(ctx, worker_id, h);
+    }
+
+    explicit operator bool() const noexcept { return fn != nullptr; }
+};
+
+// Forward declaration — defined in worker.cc (needs worker.h / work_stealing_executor.h).
+RouteFunc get_current_route();
 
 namespace detail {
     extern size_t (*get_current_worker_id)();
@@ -53,15 +61,28 @@ public:
         // resume them inline so they can continue and eventually notice.
         auto* waiters = waiters_.exchange(nullptr, std::memory_order_acq_rel);
         if (waiters) {
-            // Clear the posted bit (kPostedBit = 1) which may be encoded in
-            // waiters_ after post() has been called.  Without clearing, we'd
-            // pass an invalid pointer (e.g. 0x1) into resume_chain.
-            resume_chain(clear_posted(waiters), nullptr);
+        // Clear the posted bit (kPostedBit = 1) which may be encoded in
+        // waiters_ after post() has been called.  Without clearing, we'd
+        // pass an invalid pointer (e.g. 0x1) into resume_chain.
+        resume_chain(clear_posted(waiters));
         }
     }
 
     AffinityBaton(const AffinityBaton&) = delete;
     AffinityBaton& operator=(const AffinityBaton&) = delete;
+
+    // Move is safe only when baton has no waiters (freshly constructed).
+    // In when_all, the baton is embedded in the awaiter and never has
+    // waiters at construction time, so this is sound.
+    AffinityBaton(AffinityBaton&& other) noexcept
+        : waiters_(other.waiters_.exchange(nullptr, std::memory_order_acq_rel)) {}
+
+    AffinityBaton& operator=(AffinityBaton&& other) noexcept {
+        if (this != &other) {
+            waiters_.store(other.waiters_.exchange(nullptr, std::memory_order_acq_rel));
+        }
+        return *this;
+    }
 
     // ── Query ──
 
@@ -77,9 +98,20 @@ public:
     // ── Reset (only safe when no waiters exist) ──
 
     void reset() noexcept {
-        // Clear posted bit; only safe with no waiters
-        auto* v = waiters_.load(std::memory_order_relaxed);
-        waiters_.store(v, std::memory_order_release);
+        // Atomically clear kPostedBit while preserving any waiter chain.
+        // If there is no posted bit (not posted or has waiters), this is a no-op.
+        // The CAS loop ensures we don't lose waiters added concurrently by post().
+        auto* old = waiters_.load(std::memory_order_acquire);
+        while (reinterpret_cast<uintptr_t>(old) & kPostedBit) {
+            auto* cleared = clear_posted(old);
+            if (waiters_.compare_exchange_weak(
+                    old, cleared,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                break;
+            }
+            // old is updated by CAS failure, retry
+        }
     }
 
     // ── Intrusive waiter node ──
@@ -87,6 +119,7 @@ public:
     struct WaiterNode {
         std::coroutine_handle<> handle;
         size_t worker_id;     // waiter's worker_id (SIZE_MAX = external thread)
+        RouteFunc route;      // how to resume this waiter on its worker
         WaiterNode* next;
     };
 
@@ -103,6 +136,7 @@ public:
         void await_suspend(std::coroutine_handle<> handle) noexcept {
             node.handle = handle;
             node.worker_id = current_worker_id();
+            node.route = get_current_route();
             node.next = nullptr;
 
             // Single CAS: atomically checks posted bit AND enqueues.
@@ -138,7 +172,7 @@ public:
         AffinityBaton& baton;
         Duration timeout;
         WaiterNode node;
-        std::shared_ptr<TimedWaitState> state;
+        TimedWaitState state;  // embedded in coroutine frame — zero heap alloc
         WaitResult result{WaitResult::kTimeout};
 
         bool await_ready() const noexcept {
@@ -149,13 +183,13 @@ public:
         void await_suspend(std::coroutine_handle<> h) noexcept;
 
         WaitResult await_resume() const noexcept {
-            return state->timed_out.load(std::memory_order_acquire)
+            return state.timed_out.load(std::memory_order_acquire)
                 ? WaitResult::kTimeout : WaitResult::kSignaled;
         }
     };
 
     TimedAwaiter wait_for(Duration timeout) noexcept {
-        return {*this, timeout, {}, std::make_shared<TimedWaitState>(), WaitResult::kTimeout};
+        return {*this, timeout, {}, TimedWaitState{}, WaitResult::kTimeout};
     }
 
     Awaiter operator co_await() noexcept {
@@ -165,10 +199,8 @@ public:
     // ── Post with routing ──
     //
     // Atomically drains the waiter chain and routes each waiter's
-    // continuation through the provided RouteFunc. The caller is
-    // responsible for delivering the coroutine handle to the correct
-    // worker thread (e.g. via add_to_worker or a work-stealing executor).
-    void post(RouteFunc route);
+    // continuation using the RouteFunc saved in each WaiterNode.
+    void post();
 
     // ── Direct post (no routing) ──
     //
@@ -179,8 +211,7 @@ public:
 private:
     static size_t current_worker_id();
 
-    static void resume_chain(WaiterNode* waiters,
-                             RouteFunc* route);
+    static void resume_chain(WaiterNode* waiters);
 
     // Posted bit encoded in waiters_ pointer low bit (pointer is 4/8-byte aligned).
     // This merges state_ and waiters_ into a single atomic, eliminating the

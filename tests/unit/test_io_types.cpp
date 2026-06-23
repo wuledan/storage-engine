@@ -30,7 +30,7 @@ TEST(IOTypesTest, DefaultCompletion) {
 TEST(IOEngineTest, UnknownTypeThrows) {
     IOBackendConfig cfg;
     cfg.type = "unknown";
-    EXPECT_THROW(IOEngine::create(cfg, nullptr), std::runtime_error);
+    EXPECT_THROW(IOEngine::create(cfg), std::runtime_error);
 }
 
 // ============================================================================
@@ -39,7 +39,7 @@ TEST(IOEngineTest, UnknownTypeThrows) {
 TEST(IOEngineTest, KnownTypesDoNotThrowFromConfig) {
     IOBackendConfig cfg;
     cfg.type = "io_uring";
-    auto backend = IOEngine::create(cfg, nullptr);
+    auto backend = IOEngine::create(cfg);
     ASSERT_NE(backend, nullptr);
     EXPECT_EQ(backend->name(), "io_uring");
 }

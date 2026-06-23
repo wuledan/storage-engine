@@ -2,8 +2,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
-#include <folly/coro/Task.h>
-#include <folly/coro/BlockingWait.h>
+#include "runtime/coro_task.h"
 #include "runtime/online_worker.h"
 #include "runtime/affine_work_queue.h"
 #include "runtime/local_work_queue.h"

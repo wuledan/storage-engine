@@ -6,6 +6,7 @@
 #include "worker_registry.h"
 #include "timer.h"
 #include "metric_counter.h"
+#include "coro_task.h"
 #include <hwloc.h>
 
 namespace storage::runtime {
@@ -40,34 +41,46 @@ size_t AffinityBaton::current_worker_id() {
     return detail::get_current_worker_id();
 }
 
-void AffinityBaton::post(RouteFunc route) {
+void AffinityBaton::post() {
     auto* old = waiters_.exchange(
         reinterpret_cast<WaiterNode*>(kPostedBit),
         std::memory_order_acq_rel);
-    resume_chain(clear_posted(old), &route);
+    resume_chain(clear_posted(old));
 }
 
 void AffinityBaton::post_direct() noexcept {
     auto* old = waiters_.exchange(
         reinterpret_cast<WaiterNode*>(kPostedBit),
         std::memory_order_acq_rel);
-    resume_chain(clear_posted(old), nullptr);
+    resume_chain(clear_posted(old));
 }
 
-void AffinityBaton::resume_chain(WaiterNode* waiters, RouteFunc* route) {
+void AffinityBaton::resume_chain(WaiterNode* waiters) {
     while (waiters) {
         auto* next = waiters->next;
         auto handle = waiters->handle;
         auto worker_id = waiters->worker_id;
 
-        if (route && worker_id != SIZE_MAX) {
-            (*route)(worker_id, handle);
+        if (waiters->route && worker_id != SIZE_MAX) {
+            waiters->route(worker_id, handle);
         } else {
             handle.resume();
         }
 
         waiters = next;
     }
+}
+
+// ── get_current_route ──
+// Implementation of the function declared in affinity_baton.h.
+// Defined here because it needs worker.h and work_stealing_executor.h.
+RouteFunc get_current_route() {
+    if (auto* ow = storage::runtime::current_online_worker()) {
+        return ow->make_route_func();
+    } else if (auto* exec = storage::runtime::WorkStealingExecutor::current_executor()) {
+        return exec->make_route_func();
+    }
+    return RouteFunc{};
 }
 
 // ── AffinityMutex method implementations ──
@@ -101,8 +114,8 @@ void AffinityMutex::unlock() {
     } while (true);
 
     if (waiters) {
-        if (route_ && waiters->worker_id != SIZE_MAX) {
-            route_(waiters->worker_id, waiters->handle);
+        if (waiters->route && waiters->worker_id != SIZE_MAX) {
+            waiters->route(waiters->worker_id, waiters->handle);
         } else {
             waiters->handle.resume();
         }
@@ -112,9 +125,13 @@ void AffinityMutex::unlock() {
 // ── AffinityBaton::TimedAwaiter::await_suspend ──
 // Registers with both the baton waiter chain AND the timer system.
 // Timer expiry calls on_expire which sets timed_out and posts the baton.
+// Each waiter's route is saved in node.route during registration, so the
+// timer callback does not need to carry its own RouteFunc — it just calls
+// baton.post(), which uses each waiter's own saved route.
 void AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexcept {
     node.handle = h;
     node.worker_id = detail::get_current_worker_id();
+    node.route = get_current_route();
     node.next = nullptr;
 
     // 1. Register with baton (same CAS chain logic as Awaiter)
@@ -134,24 +151,12 @@ void AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexc
 
     // 2. Zero / negative timeout → immediate timeout
     if (timeout <= Duration::zero()) {
-        state->timed_out.store(true, std::memory_order_release);
+        state.timed_out.store(true, std::memory_order_release);
         baton.post_direct();
         return;
     }
 
-    // 3. Create route function (for timer callback — preserves affinity)
-    RouteFunc route;
-    size_t source_worker = SIZE_MAX;
-    if (auto* ow = current_online_worker()) {
-        route = ow->make_route_func();
-    } else if (auto* exec = WorkStealingExecutor::current_executor()) {
-        route = exec->make_route_func();
-        source_worker = WorkerRegistry::instance().get_global_id_for_offline(
-            exec, node.worker_id);
-    }
-    // If neither, route stays empty → post_direct fallback
-
-    // 4. Register with timer system
+    // 3. Register with timer system
     Clock::time_point deadline = Clock::now() + timeout;
 
     TimerNode tn;
@@ -159,16 +164,12 @@ void AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexc
     tn.handle = h;
     tn.source_queue_idx = (tls_source_queue_idx != SIZE_MAX)
         ? tls_source_queue_idx : SIZE_MAX;
-    tn.source_worker_id = source_worker;
+    tn.source_worker_id = SIZE_MAX;  // Not needed — baton.post() uses node.route
 
-    auto state_copy = state;
-    tn.on_expire = [state_copy, route = std::move(route), &baton = this->baton]() {
-        state_copy->timed_out.store(true, std::memory_order_release);
-        if (route) {
-            baton.post(route);
-        } else {
-            baton.post_direct();
-        }
+    auto* state_ptr = &state;
+    tn.on_expire = [state_ptr, &baton = this->baton]() {
+        state_ptr->timed_out.store(true, std::memory_order_release);
+        baton.post();  // Uses each waiter's own saved route
     };
 
     if (auto* ow = current_online_worker()) {
@@ -177,7 +178,7 @@ void AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexc
         global_offline_timer().insert(std::move(tn));
     } else {
         // No timer context — signal timeout immediately
-        state->timed_out.store(true, std::memory_order_release);
+        state.timed_out.store(true, std::memory_order_release);
         baton.post_direct();
     }
 }
@@ -247,33 +248,6 @@ void Worker::join() {
 
 void Worker::notify() {
     idle_->notify();
-}
-
-// ── folly::Executor ──
-// 遵循 quant::WorkStealingExecutor 模式
-// folly::coro::Task 完成时通过此方法调度回 worker 的 P0 队列
-namespace {
-struct ExecutorTask {
-    struct promise_type {
-        folly::Func func;
-        ExecutorTask get_return_object() {
-            return ExecutorTask{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-        std::suspend_never initial_suspend() noexcept { return {}; }
-        std::suspend_never final_suspend() noexcept { return {}; }
-        void return_void() noexcept {}
-        void unhandled_exception() noexcept { std::terminate(); }
-    };
-    std::coroutine_handle<promise_type> handle;
-};
-}  // namespace
-
-void Worker::add(folly::Func func) {
-    auto task = [](folly::Func f) -> ExecutorTask {
-        f();
-        co_return;
-    }(std::move(func));
-    enqueue_affine(task.handle);
 }
 
 WorkerStats Worker::stats() const {

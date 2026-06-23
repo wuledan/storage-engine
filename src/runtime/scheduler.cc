@@ -9,6 +9,8 @@ namespace {
     metric::MetricCounter g_sched_iters;
     metric::MetricCounter g_drain_p0_ns;
     metric::MetricCounter g_drain_all_ns;
+    metric::MetricCounter g_io_poll_ns;
+    metric::MetricCounter g_drain_p0b_ns;
 }
 
 static uint64_t now_ns() {
@@ -40,6 +42,8 @@ WorkQueue* Scheduler::get_queue(size_t idx) const {
 void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
     if (affine_idx_ >= queues_.size()) return;
     auto& q = queues_[affine_idx_];
+    // Check perf level once outside the loop to avoid repeated atomic reads.
+    auto lv = perf_ ? perf_->level() : PerfLevel::kNone;
     while (true) {
         size_t n = q->try_dequeue_batch(batch.data(), max_batch);
         if (n == 0) break;
@@ -47,15 +51,19 @@ void Scheduler::drain_p0(std::vector<WorkItem>& batch, size_t max_batch) {
         for (size_t i = 0; i < n; ++i) {
             tls_source_queue_idx = affine_idx_;
             tls_source_queue = q.get();
-            if (batch[i].tag == 1) {
+            if (lv == PerfLevel::kNone) {
+                // Fast path: no timing, just count
                 batch[i].execute();
+                stats_.total_tasks_executed++;
             } else {
                 auto t0 = now_ns();
                 batch[i].execute();
                 auto exec_ns = now_ns() - t0;
                 stats_.total_tasks_executed++;
                 stats_.total_exec_ns += exec_ns;
-                if (perf_) perf_->record_exec(q->type(), exec_ns);
+                if (perf_ && lv >= PerfLevel::kTrace) {
+                    perf_->record_exec(q->type(), exec_ns);
+                }
             }
         }
         total_dequeued_[affine_idx_] += n;
@@ -173,13 +181,26 @@ void Scheduler::run_busy() {
         uint64_t t1 = __builtin_ia32_rdtsc();
 
         // P1: disk IO coroutine (poll CQEs, fire callbacks, then re-enqueue)
+        auto lv = perf_ ? perf_->level() : PerfLevel::kNone;
         if (disk_io_idx_ < queues_.size()) {
             std::vector<WorkItem> io_batch(kMaxBatchSize);
             size_t n = queues_[disk_io_idx_]->try_dequeue_batch(io_batch.data(), kMaxBatchSize);
             for (size_t i = 0; i < n; ++i) {
                 tls_source_queue_idx = disk_io_idx_;
                 tls_source_queue = queues_[disk_io_idx_].get();
-                io_batch[i].execute();
+                if (lv == PerfLevel::kNone) {
+                    io_batch[i].execute();
+                    stats_.total_tasks_executed++;
+                } else {
+                    auto t0 = now_ns();
+                    io_batch[i].execute();
+                    auto exec_ns = now_ns() - t0;
+                    stats_.total_tasks_executed++;
+                    stats_.total_exec_ns += exec_ns;
+                    if (lv >= PerfLevel::kTrace) {
+                        perf_->record_exec(queues_[disk_io_idx_]->type(), exec_ns);
+                    }
+                }
             }
         }
         // Then: engine, net_io, timer (everything else)
@@ -192,27 +213,42 @@ void Scheduler::run_busy() {
             for (size_t i = 0; i < n; ++i) {
                 tls_source_queue_idx = qi;
                 tls_source_queue = qp;
-                other_batch[i].execute();
+                if (lv == PerfLevel::kNone) {
+                    other_batch[i].execute();
+                    stats_.total_tasks_executed++;
+                } else {
+                    auto t0 = now_ns();
+                    other_batch[i].execute();
+                    auto exec_ns = now_ns() - t0;
+                    stats_.total_tasks_executed++;
+                    stats_.total_exec_ns += exec_ns;
+                    if (lv >= PerfLevel::kTrace) {
+                        perf_->record_exec(qp->type(), exec_ns);
+                    }
+                }
             }
         }
         uint64_t t2 = __builtin_ia32_rdtsc();
 
-        probe.io_poll    += t1 - t_iter;
-        probe.drain_p0   += t1 - t_iter;
-        probe.drain_p0b  += t2 - t1;
-        probe.iter       += t2 - t_iter;
+        // Second P0 drain (tasks may have produced new P0 work)
+        drain_p0(p0_batch, kMaxBatchSize);
+        uint64_t t3 = __builtin_ia32_rdtsc();
+
+        // Probe stats (matching run() semantics)
+        probe.drain_p0    += t1 - t_iter;
+        probe.io_poll     += t2 - t1;       // IO + other queue processing
+        probe.drain_p0b   += t3 - t2;       // Second P0 drain
+        probe.iter        += t3 - t_iter;
         probe_count++;
         g_sched_iters << 1;
         g_drain_p0_ns << ((t1 - t_iter) / 3);   // rdtsc → ns (approx 3GHz)
         g_drain_all_ns << ((t2 - t1) / 3);
-
-        // Report one scheduling cycle timing
-        if (probe_count == 50000) {
-            printf("  [Cycle timing @50K iters] drain_p0=%.0fns drain_all=%.0fns total=%.0fns\n",
-                   probe.drain_p0 / (double)probe_count / 3.0,
-                   probe.drain_p0b / (double)probe_count / 3.0,
-                   probe.iter / (double)probe_count / 3.0);
-        }
+        g_io_poll_ns << ((t2 - t1) / 3);        // same as drain_all for backward compat
+        g_drain_p0b_ns << ((t3 - t2) / 3);      // second P0 drain time
+        // Cycle timing available via metrics API:
+        //   avg_drain_p0  = g_drain_p0_ns  / g_sched_iters
+        //   avg_io_poll   = g_io_poll_ns   / g_sched_iters
+        //   avg_drain_p0b = g_drain_p0b_ns / g_sched_iters
     }
 }
 
@@ -221,6 +257,8 @@ void register_scheduler_metrics() {
     MetricRegistry::instance().register_counter("scheduler/iters", &g_sched_iters);
     MetricRegistry::instance().register_counter("scheduler/drain_p0_ns", &g_drain_p0_ns);
     MetricRegistry::instance().register_counter("scheduler/drain_all_ns", &g_drain_all_ns);
+    MetricRegistry::instance().register_counter("scheduler/io_poll_ns", &g_io_poll_ns);
+    MetricRegistry::instance().register_counter("scheduler/drain_p0b_ns", &g_drain_p0b_ns);
 }
 
 }  // namespace storage::runtime

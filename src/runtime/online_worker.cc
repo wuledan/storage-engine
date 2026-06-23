@@ -11,25 +11,16 @@ namespace storage::runtime {
 
 namespace {
 
-// ── IO poll coroutine type ──
-struct IOCoroTask {
-    struct promise_type {
-        IOCoroTask get_return_object() {
-            return IOCoroTask{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
-        std::suspend_never initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
-        void return_void() noexcept {}
-        void unhandled_exception() noexcept { std::terminate(); }
-    };
-    std::coroutine_handle<promise_type> handle;
-};
-
 // ── Persistent IO poll coroutine ──
 // Suspends via yield() which routes back to disk_io (P1) because
 // tls_source_queue_idx is set by init_io_backend() before creation.
 // Scheduler resumes via P1 dequeue → handle.resume().
-static IOCoroTask io_poll_coro_fn(OnlineWorker* w) {
+//
+// Callbacks are invoked inline inside the backend's poll() method,
+// using the IORequest::CallbackFn function pointer + context (zero
+// heap allocation). The IOCompletion array here only captures result
+// data and is no longer used for callback dispatch.
+static adapt::Task<void> io_poll_coro_fn(OnlineWorker* w) {
     io::IOCompletion io_comps[64];
     while (true) {
         auto* backend = w->io_backend();
@@ -37,42 +28,54 @@ static IOCoroTask io_poll_coro_fn(OnlineWorker* w) {
 
         backend->flush_pending();
         backend->flush_submissions();
-        size_t n = backend->poll(io_comps, 64);
-        for (size_t j = 0; j < n; ++j) {
-            if (io_comps[j].callback) {
-                io_comps[j].callback(io_comps[j]);
-            }
-        }
+        backend->poll(io_comps, 64);
+        // Callbacks already invoked inside poll() — no dispatch needed here.
 
         co_await yield();
     }
 }
 
 // ── Timer coroutine ──
-// Runs on the P4 (timer) queue: drains expired timers and re-enqueues
-// the sleeping coroutines to their source queues, then yields back
-// to the timer queue.
-static IOCoroTask timer_coro_fn(OnlineWorker* w) {
+// Runs on the timer (P1) queue: drains expired timers and re-enqueues
+// the sleeping coroutines to their source queues, then yields.
+//
+// IMPORTANT: When no timers have expired, we use yield() (which routes
+// back to the engine queue P2 via default_queue_idx()) instead of
+// yield_to(idx_timer_) (which stays in P1).  This prevents the timer
+// coroutine from starving lower-priority queues (P2/P3) under the
+// StrictPriority scheduling policy: without this, the persistent timer
+// loop keeps P1 non-empty forever and P2/P3 never get scheduled.
+static adapt::Task<void> timer_coro_fn(OnlineWorker* w) {
     while (true) {
         auto& ts = w->timer_state();
         auto now = Clock::now();
         auto expired = ts.expire(now);
 
-        for (auto& node : expired) {
-            if (node.on_expire) {
-                // Timed baton wait: callback sets timed_out and posts baton
-                node.on_expire();
-            } else {
-                size_t qidx = (node.source_queue_idx != SIZE_MAX)
-                    ? node.source_queue_idx : w->idx_engine_;
-                auto* q = w->get_queue(qidx);
-                if (q) {
-                    q->enqueue(WorkItem::make_coro(node.handle));
+        if (!expired.empty()) {
+            for (auto& node : expired) {
+                if (node.on_expire) {
+                    // Timed baton wait: callback sets timed_out and posts baton
+                    node.on_expire();
+                } else {
+                    size_t qidx = (node.source_queue_idx != SIZE_MAX)
+                        ? node.source_queue_idx : w->idx_engine_;
+                    auto* q = w->get_queue(qidx);
+                    if (q) {
+                        q->enqueue(WorkItem::make_coro(node.handle));
+                    }
                 }
             }
-        }
 
-        co_await yield_to(w->idx_timer_);
+            // More timers may have expired while we processed; stay in P1
+            // for a prompt re-check.
+            co_await yield_to(w->idx_timer_);
+        } else {
+            // No expired timers → yield to lower-priority queues so they
+            // are not starved.  yield() uses default_queue_idx() (engine
+            // queue / P2) when tls_source_queue_idx is unset, which is the
+            // case in the non-busy_poll scheduler path.
+            co_await yield();
+        }
     }
 }
 
@@ -107,7 +110,8 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     auto timer_coro = timer_coro_fn(this);
     tls_source_queue_idx = SIZE_MAX;
     tls_source_queue = nullptr;
-    (void)timer_coro;
+    auto timer_h = timer_coro.release();
+    timer_h.resume();  // Start the timer loop — will run until yield, then self-manage
 }
 
 void OnlineWorker::submit_engine(WorkItem item) {
@@ -135,22 +139,27 @@ void OnlineWorker::submit_disk_io(WorkItem item) {
 
 void OnlineWorker::enqueue_affine(std::coroutine_handle<> h) {
     auto* q = static_cast<RingWorkQueue*>(get_queue(idx_affine_));
-    if (q) {
-        q->enqueue(WorkItem::make_coro(h));
-        // notify() removed — busy_poll Scheduler always awake
-    }
+    assert(q != nullptr && "affine queue must exist in OnlineWorker");
+    q->enqueue(WorkItem::make_coro(h));
+    // notify() removed — busy_poll Scheduler always awake
 }
 
 adapt::RouteFunc OnlineWorker::make_route_func() {
-    return [this](size_t /*worker_id*/, std::coroutine_handle<> h) {
-        this->enqueue_affine(h);
+    return adapt::RouteFunc{
+        [](void* ctx, size_t /*worker_id*/, std::coroutine_handle<> h) {
+            static_cast<OnlineWorker*>(ctx)->enqueue_affine(h);
+        },
+        this
     };
 }
 
 // ── IO Backend ──
 
 void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
-    io_backend_ = io::IOEngine::create(cfg, make_route_func());
+    // RouteFn has been removed from IIOBackend. co_read/co_write use
+    // each waiter's own route saved in the baton node. No routing
+    // function needed at the backend level.
+    io_backend_ = io::IOEngine::create(cfg);
     scheduler().set_io_backend(io_backend_.get());
 
     // Set tls_source_queue_idx + tls_source_queue so yield() inside
@@ -162,10 +171,11 @@ void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     auto io_coro = io_poll_coro_fn(this);
     tls_source_queue_idx = SIZE_MAX;  // reset
     tls_source_queue = nullptr;
-    (void)io_coro;
+    auto io_h = io_coro.release();
+    io_h.resume();  // Start the IO poll loop — will run until yield, then self-manage
 }
 
-folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(
+adapt::Task<io::IOCompletion> OnlineWorker::co_read(
     int fd, uint64_t offset, void* buf, size_t len) {
     if (!io_backend_) {
         throw std::runtime_error("IO backend not initialized");
@@ -173,7 +183,7 @@ folly::coro::Task<io::IOCompletion> OnlineWorker::co_read(
     co_return co_await io_backend_->co_read(fd, offset, buf, len);
 }
 
-folly::coro::Task<io::IOCompletion> OnlineWorker::co_write(
+adapt::Task<io::IOCompletion> OnlineWorker::co_write(
     int fd, uint64_t offset, const void* buf, size_t len) {
     if (!io_backend_) {
         throw std::runtime_error("IO backend not initialized");

@@ -27,7 +27,6 @@
 #include "online_group.h"
 #include "work_stealing_executor.h"
 #include "metric_counter.h"
-#include <memory>
 #include <atomic>
 #include <type_traits>
 #include <functional>  // std::invoke, std::invoke_result_t
@@ -145,30 +144,14 @@ inline int coro_create(coro_t *coro, const coro_attr_t * /*attr*/,
     if (!w) return -ENXIO;  // not on a worker thread
 
     auto* state = new coro_state;
-    auto route = w->make_route_func();
-
-    // ── Engine coroutine type ──
-    //   initial_suspend = always  : submitted via handle, never runs inline
-    //   final_suspend   = never   : coroutine frame destroyed after co_return
-    struct CoroTask {
-        struct promise_type {
-            CoroTask get_return_object() {
-                return CoroTask{
-                    std::coroutine_handle<promise_type>::from_promise(*this)};
-            }
-            std::suspend_always initial_suspend() noexcept { return {}; }
-            std::suspend_never  final_suspend()   noexcept { return {}; }
-            void return_void()   noexcept {}
-            void unhandled_exception() noexcept { std::terminate(); }
-        };
-        std::coroutine_handle<promise_type> handle;
-    };
 
     // Generic lambda (no captures) — all state lives as coroutine function
     // parameters in the coroutine frame, surviving suspends.
     // This avoids dangling-capture issues.
+    // The route is no longer passed explicitly — the waiter (coro_join)
+    // saves its own route via get_current_route() in await_suspend.
     auto task = [](void* (*fn)(void*), void* a,
-                    coro_state* s, adapt::RouteFunc rt) -> CoroTask {
+                    coro_state* s) -> adapt::Task<void> {
         // Track this coroutine for coro_self()
         detail::tls_current_coro = s;
         s->retval = fn(a);
@@ -177,7 +160,7 @@ inline int coro_create(coro_t *coro, const coro_attr_t * /*attr*/,
         // Signal completion — must happen before the post so that any
         // concurrent coro_join awaiter sees baton.ready() == true.
         s->done.store(true, std::memory_order_release);
-        s->baton.post(rt);
+        s->baton.post();  // Uses each waiter's own saved route
 
         // Auto-cleanup if detached before completion
         if (s->detached) {
@@ -185,11 +168,10 @@ inline int coro_create(coro_t *coro, const coro_attr_t * /*attr*/,
             delete s;
         }
         co_return;
-    }(start_routine, arg, state, std::move(route));
+    }(start_routine, arg, state);
 
     // Submit to engine queue — the queue now "owns" the handle
-    w->submit_engine(WorkItem::make_coro(task.handle));
-    task.handle = {};
+    w->submit_engine(WorkItem::make_coro(task.release()));
 
     *coro = static_cast<coro_t>(state);
     g_coro_created_ctr << 1;
@@ -304,14 +286,6 @@ inline int coro_mutex_destroy(coro_mutex_t *mutex) {
     return 0;
 }
 
-inline int coro_mutex_lock(coro_mutex_t *mutex) {
-    if (!mutex) return -EINVAL;
-    // Blocking spin-lock — only safe when caller is on the same worker.
-    // AffinityMutex::lock() spin-waits internally.
-    mutex->lock();
-    return 0;
-}
-
 inline int coro_mutex_unlock(coro_mutex_t *mutex) {
     if (!mutex) return -EINVAL;
     mutex->unlock();
@@ -337,15 +311,6 @@ inline int coro_sem_destroy(coro_sem_t *sem) {
     return 0;
 }
 
-inline int coro_sem_wait(coro_sem_t *sem) {
-    if (!sem) return -EINVAL;
-    // Blocking spin-wait on try_acquire()
-    while (!sem->try_acquire()) {
-        __builtin_ia32_pause();
-    }
-    return 0;
-}
-
 inline int coro_sem_post(coro_sem_t *sem) {
     if (!sem) return -EINVAL;
     sem->release();
@@ -368,32 +333,17 @@ void co_spawn(F&& func) {
     auto* w = current_online_worker();
     if (!w) return;
 
-    struct SpawnTask {
-        struct promise_type {
-            SpawnTask get_return_object() {
-                return SpawnTask{
-                    std::coroutine_handle<promise_type>::from_promise(*this)};
-            }
-            std::suspend_always initial_suspend() noexcept { return {}; }
-            std::suspend_never  final_suspend()   noexcept { return {}; }
-            void return_void()   noexcept {}
-            void unhandled_exception() noexcept { std::terminate(); }
-        };
-        std::coroutine_handle<promise_type> handle;
-    };
-
-    auto task = [](auto fn) -> SpawnTask {
+    auto task = [](auto fn) -> adapt::Task<void> {
         fn();
         co_return;
     }(std::forward<F>(func));
 
-    w->submit_engine(WorkItem::make_coro(task.handle));
-    task.handle = {};
+    w->submit_engine(WorkItem::make_coro(task.release()));
 }
 
 // ── co_async: submit + get result ──
 template<typename R, typename F>
-folly::coro::Task<R> co_async(F&& func) {
+adapt::Task<R> co_async(F func) {
     auto* w = current_online_worker();
     if (!w) {
         if constexpr (std::is_void_v<R>) {
@@ -402,7 +352,7 @@ folly::coro::Task<R> co_async(F&& func) {
             co_return R{};
         }
     }
-    co_return co_await w->co_submit<R>(std::forward<F>(func));
+    co_return co_await w->co_submit<R>(std::move(func));
 }
 
 // ═══════════════════════════════════════════════════════
@@ -569,104 +519,32 @@ auto when_all(Fs&&... funcs) {
         std::atomic<size_t> remaining{N};
         AffinityBaton baton;
         ResultTuple results;
+
+        SharedState() = default;
+        SharedState(SharedState&& other) noexcept
+            : remaining(other.remaining.load(std::memory_order_acquire))
+            , baton(std::move(other.baton))
+            , results(std::move(other.results)) {}
+        SharedState& operator=(SharedState&&) = delete;
     };
 
-    auto state = std::make_shared<SharedState>();
-
-    // When N == 0 there are no tasks to spawn; post the baton
-    // immediately so the awaiter returns without suspending.
-    if constexpr (N == 0) {
-        state->baton.post_direct();
-    }
-
-    // ── Spawn tasks (only for N > 0) ──
-    if constexpr (N > 0) {
-
-    // Build a RouteFunc from the current executor context.
-    RouteFunc route = []() -> RouteFunc {
-        if (auto* ow = current_online_worker()) {
-            return ow->make_route_func();
-        } else if (auto* exec = WorkStealingExecutor::current_executor()) {
-            return exec->make_route_func();
-        }
-        return RouteFunc{};
-    }();
-
-    // ── SpawnTask — local coroutine type for wrapping capturing lambdas ──
-    //   initial_suspend = always  : submitted via handle, never runs inline
-    //   final_suspend   = never   : coroutine frame auto-destroyed after body
-    struct SpawnTask {
-        struct promise_type {
-            SpawnTask get_return_object() {
-                return SpawnTask{
-                    std::coroutine_handle<promise_type>::from_promise(*this)};
-            }
-            std::suspend_always initial_suspend() noexcept { return {}; }
-            std::suspend_never  final_suspend()   noexcept { return {}; }
-            void return_void()   noexcept {}
-            void unhandled_exception() noexcept { std::terminate(); }
-        };
-        std::coroutine_handle<promise_type> handle;
-    };
-
-    // ── spawn_one: spawn a single task at compile-time index I ──
-    auto spawn_one = [&]<size_t I, typename F>(F&& func) {
-        // Inner coroutine lambda — no captures, all state as function
-        // parameters (stored in the coroutine frame).
-        auto task = [](auto f, std::shared_ptr<SharedState> s,
-                       RouteFunc rt) -> SpawnTask {
-            // Execute the callable and store result at index I
-            if constexpr (std::is_void_v<
-                              std::invoke_result_t<std::decay_t<decltype(f)>>>) {
-                f();
-            } else {
-                std::get<I>(s->results) = f();
-            }
-            // Decrement the counter; if this was the last task, post
-            // the baton to resume the original awaiter.
-            if (s->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                s->baton.post(std::move(rt));
-            }
-            co_return;
-        }(std::forward<F>(func), state, route);
-
-        // Submit the coroutine handle to the current executor.
-        // NOTE: we use enqueue_affine (P0) for OnlineWorker because the
-        // engine queue is starved by the persistent timer coroutine (P1)
-        // created in the OnlineWorker constructor.  The affine queue is
-        // drained unconditionally in drain_p0() on every scheduler tick.
-        if (auto* ow = current_online_worker()) {
-            ow->enqueue_affine(task.handle);
-        } else if (auto* exec = WorkStealingExecutor::current_executor()) {
-            exec->add(WorkItem::make_coro(task.handle));
-        }
-        // Release ownership — executor owns the handle now.
-        task.handle = {};
-    };
-
-    // Fold over all callables with their positional indices
-    [&]<size_t... Is>(std::index_sequence<Is...>) {
-        (spawn_one.template operator()<Is>(std::forward<Fs>(funcs)), ...);
-    }(std::index_sequence_for<Fs...>{});
-
-    }  // if constexpr (N > 0)
-
-    // ── Awaiter returned for co_await ──
-    //
-    // Embeds AffinityBaton::Awaiter so the WaiterNode lives on the
-    // awaiting coroutine's frame (stable for the entire suspend).
+    // ── SharedState embedded in WhenAllAwaiter on the caller's coroutine
+    // frame — zero heap allocation.  Spawned tasks receive a raw pointer
+    // (&awaiter.state) which remains valid because the caller suspends at
+    // co_await awaiter until all tasks complete.
     struct WhenAllAwaiter {
-        std::shared_ptr<SharedState> state;
+        SharedState state;
         AffinityBaton::Awaiter baton_awaiter;
 
-        WhenAllAwaiter(std::shared_ptr<SharedState> s)
-            : state(std::move(s))
-            , baton_awaiter{state->baton, AffinityBaton::WaiterNode{}}
+        WhenAllAwaiter()
+            : baton_awaiter{state.baton, AffinityBaton::WaiterNode{}}
         {}
 
         WhenAllAwaiter(const WhenAllAwaiter&) = delete;
         WhenAllAwaiter& operator=(const WhenAllAwaiter&) = delete;
-        WhenAllAwaiter(WhenAllAwaiter&&) = default;
+        WhenAllAwaiter(WhenAllAwaiter&& other) noexcept
+            : state(std::move(other.state))
+            , baton_awaiter{state.baton, std::move(other.baton_awaiter.node)} {}
         WhenAllAwaiter& operator=(WhenAllAwaiter&&) = delete;
 
         bool await_ready() noexcept {
@@ -678,11 +556,63 @@ auto when_all(Fs&&... funcs) {
         }
 
         ResultTuple await_resume() noexcept {
-            return std::move(state->results);
+            return std::move(state.results);
         }
     };
 
-    return WhenAllAwaiter{std::move(state)};
+    WhenAllAwaiter awaiter;
+
+    // When N == 0 there are no tasks to spawn; post the baton
+    // immediately so the awaiter returns without suspending.
+    if constexpr (N == 0) {
+        awaiter.state.baton.post_direct();
+    }
+
+    // ── Spawn tasks (only for N > 0) ──
+    if constexpr (N > 0) {
+
+    // ── spawn_one: spawn a single task at compile-time index I ──
+    auto spawn_one = [&]<size_t I, typename F>(F&& func) {
+        // Inner coroutine lambda — no captures, all state as function
+        // parameters (stored in the coroutine frame).
+        // The route is no longer passed explicitly — each waiter saves
+        // its own route via get_current_route() in await_suspend.
+        auto task = [](auto f, SharedState* s) -> adapt::Task<void> {
+            // Execute the callable and store result at index I
+            if constexpr (std::is_void_v<
+                              std::invoke_result_t<std::decay_t<decltype(f)>>>) {
+                f();
+            } else {
+                std::get<I>(s->results) = f();
+            }
+            // Decrement the counter; if this was the last task, post
+            // the baton to resume the original awaiter.
+            if (s->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                s->baton.post();  // Uses each waiter's own saved route
+            }
+            co_return;
+        }(std::forward<F>(func), &awaiter.state);
+
+        // Submit the coroutine handle to the current executor.
+        // NOTE: we use enqueue_affine (P0) for OnlineWorker because the
+        // engine queue is starved by the persistent timer coroutine (P1)
+        // created in the OnlineWorker constructor.  The affine queue is
+        // drained unconditionally in drain_p0() on every scheduler tick.
+        if (auto* ow = current_online_worker()) {
+            ow->enqueue_affine(task.release());
+        } else if (auto* exec = WorkStealingExecutor::current_executor()) {
+            exec->add(WorkItem::make_coro(task.release()));
+        }
+    };
+
+    // Fold over all callables with their positional indices
+    [&]<size_t... Is>(std::index_sequence<Is...>) {
+        (spawn_one.template operator()<Is>(std::forward<Fs>(funcs)), ...);
+    }(std::index_sequence_for<Fs...>{});
+
+    }  // if constexpr (N > 0)
+
+    return awaiter;
 }
 
 inline void register_coro_metrics() {

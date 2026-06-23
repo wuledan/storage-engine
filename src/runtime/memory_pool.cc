@@ -8,9 +8,6 @@
 #include <cstring>
 #include <new>
 
-#include "affinity_mutex.h"
-#include <mutex>
-
 namespace storage::runtime::adapt {
 
 // ── Size class calculation ──
@@ -31,15 +28,102 @@ static void free_block(void* p) {
     ::operator delete(p, std::align_val_t(kBlockAlignment));
 }
 
-// Find the size class for a given allocation size
+// Size classes are powers of 2: 8→0, 16→1, 32→2, 64→3, 128→4, 256→5.
+// Round size up to the next power of 2, then map via ctz.
 static size_t size_class_index(size_t size) {
-    for (size_t i = 0; i < kNumSizeClasses; ++i) {
-        if (size <= kSizeClasses[i]) return i;
+    if (size <= 8) return 0;
+    // Round up to the next power of 2 (for non-power-of-2 sizes)
+    size_t s = size - 1;
+    if constexpr (sizeof(size_t) == 8) {
+        s |= s >> 1;  s |= s >> 2;  s |= s >> 4;
+        s |= s >> 8;  s |= s >> 16; s |= s >> 32;
+    } else {
+        s |= s >> 1;  s |= s >> 2;  s |= s >> 4;
+        s |= s >> 8;  s |= s >> 16;
     }
-    return kNumSizeClasses;  // Not a small object
+    s += 1;
+    // ctz: 8=2^3→idx 0, 16=2^4→idx 1, ..., 256=2^8→idx 5
+    const size_t idx = __builtin_ctzll(s) - 3;
+    return idx < kNumSizeClasses ? idx : kNumSizeClasses;
 }
 
-// ── Per-size-class free list ──
+// ── Lock-free MPMC bounded ring buffer ──
+// Dmitry Vyukov-style bounded MPMC queue for void*.
+// Capacity must be a power of two.
+template<size_t Capacity = 256>
+class MPMCRing {
+    static_assert((Capacity & (Capacity - 1)) == 0,
+                  "MPMCRing capacity must be a power of two");
+
+    struct Cell {
+        std::atomic<size_t> sequence{0};
+        std::atomic<void*> data{nullptr};
+    };
+
+    static constexpr size_t kMask = Capacity - 1;
+    std::array<Cell, Capacity> buffer_;
+    alignas(64) std::atomic<size_t> head_{0};
+    alignas(64) std::atomic<size_t> tail_{0};
+
+public:
+    MPMCRing() {
+        for (size_t i = 0; i < Capacity; ++i) {
+            buffer_[i].sequence.store(i, std::memory_order_relaxed);
+        }
+    }
+
+    // Attempt to enqueue ptr. Returns true on success, false if full.
+    bool try_enqueue(void* ptr) noexcept {
+        size_t tail = tail_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[tail & kMask];
+            size_t seq = cell.sequence.load(std::memory_order_acquire);
+            intptr_t diff = static_cast<intptr_t>(seq) -
+                            static_cast<intptr_t>(tail);
+            if (diff < 0) return false;         // full
+            if (diff != 0) {
+                // Concurrent claimant won; reload tail
+                tail = tail_.load(std::memory_order_relaxed);
+                continue;
+            }
+            // We own this slot — try to claim it
+            if (tail_.compare_exchange_weak(tail, tail + 1,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                cell.data.store(ptr, std::memory_order_release);
+                cell.sequence.store(tail + 1, std::memory_order_release);
+                return true;
+            }
+            // CAS failed — retry with fresh tail
+        }
+    }
+
+    // Attempt to dequeue a pointer into ptr. Returns true on success.
+    bool try_dequeue(void*& ptr) noexcept {
+        size_t head = head_.load(std::memory_order_relaxed);
+        for (;;) {
+            Cell& cell = buffer_[head & kMask];
+            size_t seq = cell.sequence.load(std::memory_order_acquire);
+            intptr_t diff = static_cast<intptr_t>(seq) -
+                            static_cast<intptr_t>(head + 1);
+            if (diff < 0) return false;         // empty
+            if (diff != 0) {
+                head = head_.load(std::memory_order_relaxed);
+                continue;
+            }
+            // We own this slot — try to claim it
+            if (head_.compare_exchange_weak(head, head + 1,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                ptr = cell.data.load(std::memory_order_acquire);
+                cell.sequence.store(head + Capacity, std::memory_order_release);
+                return true;
+            }
+        }
+    }
+};
+
+// ── Per-size-class free list (lock-free, CAS-based) ──
 class SizeClassFreeList {
 public:
     struct Node {
@@ -48,51 +132,91 @@ public:
 
     void push(void* ptr) {
         auto* node = static_cast<Node*>(ptr);
-        node->next = head_;
-        head_ = node;
+        auto* old = head_.load(std::memory_order_acquire);
+        do {
+            node->next = old;
+        } while (!head_.compare_exchange_weak(old, node,
+                std::memory_order_release,
+                std::memory_order_acquire));
         count_.fetch_add(1, std::memory_order_relaxed);
     }
 
     void* pop() {
-        if (!head_) return nullptr;
-        auto* node = head_;
-        head_ = head_->next;
-        count_.fetch_sub(1, std::memory_order_relaxed);
-        return node;
+        auto* old = head_.load(std::memory_order_acquire);
+        while (old) {
+            if (head_.compare_exchange_weak(old, old->next,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                count_.fetch_sub(1, std::memory_order_relaxed);
+                return old;
+            }
+            // CAS failed — old has been reloaded by compare_exchange_weak
+        }
+        return nullptr;
     }
 
-    bool empty() const { return head_ == nullptr; }
+    bool empty() const { return head_.load(std::memory_order_acquire) == nullptr; }
     size_t count() const { return count_.load(std::memory_order_relaxed); }
 
 private:
-    Node* head_{nullptr};
+    std::atomic<Node*> head_{nullptr};
     std::atomic<size_t> count_{0};
 };
 
-// ── Central free list for medium objects (up to 4KB) ──
+// ── Central free list for medium objects (up to 4KB), lock-free ──
 class CentralFreeList {
 public:
     void push(void* ptr, size_t size) {
-        std::lock_guard<AffinityMutex> lock(mutex_);
         auto* node = static_cast<FreeNode*>(ptr);
         node->size = size;
-        node->next = head_;
-        head_ = node;
+        auto* old = head_.load(std::memory_order_acquire);
+        do {
+            node->next = old;
+        } while (!head_.compare_exchange_weak(old, node,
+                std::memory_order_release,
+                std::memory_order_acquire));
     }
 
+    // Drain the entire chain, find a node >= min_size,
+    // then push remaining nodes back onto the list.
     void* pop(size_t min_size) {
-        std::lock_guard<AffinityMutex> lock(mutex_);
-        FreeNode** prev = &head_;
-        FreeNode* curr = head_;
+        auto* chain = head_.exchange(nullptr, std::memory_order_acq_rel);
+        if (!chain) return nullptr;
+
+        FreeNode* found = nullptr;
+        FreeNode* prev = nullptr;
+        FreeNode* curr = chain;
+
         while (curr) {
-            if (curr->size >= min_size) {
-                *prev = curr->next;
-                return curr;
+            if (!found && curr->size >= min_size) {
+                // Unlink this node
+                found = curr;
+                if (prev) {
+                    prev->next = curr->next;
+                } else {
+                    chain = curr->next;
+                }
+            } else {
+                prev = curr;
             }
-            prev = &curr->next;
             curr = curr->next;
         }
-        return nullptr;
+
+        // Push back the remaining chain
+        if (chain) {
+            // Find the tail of the remaining chain
+            FreeNode* tail = chain;
+            while (tail->next) tail = tail->next;
+
+            auto* old = head_.load(std::memory_order_acquire);
+            do {
+                tail->next = old;
+            } while (!head_.compare_exchange_weak(old, chain,
+                    std::memory_order_release,
+                    std::memory_order_acquire));
+        }
+
+        return found;
     }
 
 private:
@@ -100,34 +224,51 @@ private:
         size_t size;
         FreeNode* next;
     };
-    FreeNode* head_{nullptr};
-    AffinityMutex mutex_;
+    std::atomic<FreeNode*> head_{nullptr};
 };
 
 // ── Thread-local cache ──
+// Inline free-list for TLS: no atomic, no unique_ptr indirection.
 class ThreadLocalCache {
 public:
-    ThreadLocalCache() {
-        for (size_t i = 0; i < kNumSizeClasses; ++i) {
-            free_lists_[i] = std::make_unique<SizeClassFreeList>();
-        }
-    }
+    struct LocalFreeList {
+        SizeClassFreeList::Node* head{nullptr};
+        size_t count{0};    // plain size_t — TLS is single-threaded, no atomic needed
+    };
+
+    ThreadLocalCache() = default;
 
     void* allocate(size_t size_class_idx) {
         if (size_class_idx < kNumSizeClasses) {
-            return free_lists_[size_class_idx]->pop();
+            auto& list = free_lists_[size_class_idx];
+            if (!list.head) return nullptr;
+            auto* node = list.head;
+            list.head = list.head->next;
+            list.count--;
+            return node;
         }
         return nullptr;
     }
 
     void deallocate(void* ptr, size_t size_class_idx) {
         if (size_class_idx < kNumSizeClasses) {
-            free_lists_[size_class_idx]->push(ptr);
+            auto* node = static_cast<SizeClassFreeList::Node*>(ptr);
+            auto& list = free_lists_[size_class_idx];
+            node->next = list.head;
+            list.head = node;
+            list.count++;
         }
     }
 
+    size_t list_count(size_t class_idx) const {
+        if (class_idx < kNumSizeClasses) {
+            return free_lists_[class_idx].count;
+        }
+        return 0;
+    }
+
 private:
-    std::array<std::unique_ptr<SizeClassFreeList>, kNumSizeClasses> free_lists_;
+    LocalFreeList free_lists_[kNumSizeClasses];  // inline array, no heap indirection
 };
 
 // ── QuantMemoryResource::Impl ──
@@ -190,11 +331,16 @@ public:
                 return ptr;
             }
 
-            // Cache miss — try central free list
-            {
-                std::lock_guard<AffinityMutex> lock(class_mutexes_[class_idx]);
-                ptr = small_free_lists_[class_idx]->pop();
+            // Drain return ring → central freelist (batch-transfer to reduce CAS contention)
+            void* drained;
+            int drain_count = 0;
+            while (return_rings_[class_idx].try_dequeue(drained)) {
+                small_free_lists_[class_idx]->push(drained);
+                if (++drain_count >= 16) break;  // starvation guard
             }
+
+            // Try central free list (lock-free CAS pop)
+            ptr = small_free_lists_[class_idx]->pop();
             if (ptr) {
                 stats_.cache_hit_count.fetch_add(1, std::memory_order_relaxed);
                 return ptr;
@@ -237,15 +383,21 @@ public:
             alloc_size = (alloc_size + alignment - 1) & ~(alignment - 1);
         }
 
-        // Small object — return to thread-local cache
+        // Small object — return to thread-local cache (or overflow to return ring)
         if (alloc_size <= kSmallObjectMax) {
             size_t class_idx = size_class_index(alloc_size);
             thread_local ThreadLocalCache tls_cache;
-            tls_cache.deallocate(ptr, class_idx);
+            // If TLS cache is getting full, spill to the lock-free return ring
+            // to avoid hoarding too much memory per thread.
+            if (tls_cache.list_count(class_idx) > 64) {
+                return_rings_[class_idx].try_enqueue(ptr);
+            } else {
+                tls_cache.deallocate(ptr, class_idx);
+            }
             return;
         }
 
-        // Medium object — return to central free list
+        // Medium object — return to central free list (lock-free)
         if (alloc_size <= kMediumObjectMax) {
             central_free_list_.push(ptr, alloc_size);
             return;
@@ -322,7 +474,7 @@ private:
 
     SmallObjectConfig config_;
     std::array<std::unique_ptr<SizeClassFreeList>, kNumSizeClasses> small_free_lists_;
-    std::array<AffinityMutex, kNumSizeClasses> class_mutexes_;
+    MPMCRing<> return_rings_[kNumSizeClasses];
     std::vector<char*> preallocated_blocks_;
     char* bump_block_ptr_ = nullptr;
     size_t bump_offset_ = 0;
@@ -359,17 +511,12 @@ void QuantMemoryResource::reset() noexcept {
     impl_->reset();
 }
 
-void* QuantMemoryResource::do_allocate(size_t bytes, size_t alignment) {
+void* QuantMemoryResource::allocate(size_t bytes, size_t alignment) {
     return impl_->allocate(bytes, alignment);
 }
 
-void QuantMemoryResource::do_deallocate(void* ptr, size_t bytes, size_t alignment) {
+void QuantMemoryResource::deallocate(void* ptr, size_t bytes, size_t alignment) {
     impl_->deallocate(ptr, bytes, alignment);
-}
-
-bool QuantMemoryResource::do_is_equal(
-    const std::pmr::memory_resource& other) const noexcept {
-    return this == &other;
 }
 
 QuantMemoryResource& global_memory_resource() {

@@ -17,7 +17,6 @@
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
-#include <new>
 
 namespace storage::runtime::adapt {
 
@@ -36,13 +35,12 @@ public:
 
     // ── Acquire awaiter ──
     //
-    // The WaiterNode is NOT embedded in the awaiter. Instead it is
-    // heap-allocated in await_suspend. This guarantees the node survives
-    // regardless of where the compiler places the AcquireAwaiter temporary
-    // (coroutine frame vs. real stack) — critical when the awaiter is
-    // wrapped by external adapters such as folly::ViaIfAsyncAwaiter.
+    // WaiterNode is embedded in the awaiter (on the coroutine frame),
+    // matching the pattern used by AffinityMutex::LockAwaiter and
+    // AffinityBaton::Awaiter — zero heap allocations.
     struct AcquireAwaiter {
         AffinitySemaphore& sem;
+        AffinityBaton::WaiterNode node;
 
         bool await_ready() const noexcept {
             return sem.try_acquire();
@@ -52,12 +50,9 @@ public:
         void await_resume() const noexcept {}
     };
 
-    AcquireAwaiter acquire() noexcept { return {*this}; }
+    AcquireAwaiter acquire() noexcept { return {*this, {}}; }
     bool try_acquire() noexcept;
     void release() noexcept;
-
-    // Set route callback for thread-affine wakeup (required for offline mode).
-    void set_route(RouteFunc route) noexcept { route_ = std::move(route); }
 
     size_t available() const noexcept {
         return count_.load(std::memory_order_acquire);
@@ -67,11 +62,6 @@ private:
     static size_t current_worker_id() noexcept {
         return detail::get_current_worker_id();
     }
-
-    // Route callback: if set, used in release() to route waiters back to
-    // their original worker thread instead of resuming inline. This is
-    // required for thread-affinity correctness in offline (multi-worker) mode.
-    RouteFunc route_;
 
     // Wait queue: linked list of WaiterNode, protected by single CAS
     std::atomic<AffinityBaton::WaiterNode*> waiters_{nullptr};
@@ -93,31 +83,25 @@ inline bool AffinitySemaphore::try_acquire() noexcept {
 
 inline void AffinitySemaphore::AcquireAwaiter::await_suspend(
     std::coroutine_handle<> h) noexcept {
-    // Heap-allocate the WaiterNode so it survives regardless of where the
-    // AcquireAwaiter temporary lives (coroutine frame vs. real stack).
-    auto* node = new (std::nothrow) AffinityBaton::WaiterNode{};
-    if (!node) {
-        // Allocation failure — resume immediately (safe fallback).
-        h.resume();
-        return;
-    }
-    node->handle = h;
-    node->worker_id = sem.current_worker_id();
-    node->next = nullptr;
+    // WaiterNode is embedded in AcquireAwaiter (on the coroutine frame),
+    // no heap allocation needed.
+    node.handle = h;
+    node.worker_id = sem.current_worker_id();
+    node.route = get_current_route();
+    node.next = nullptr;
 
     // CAS into waiters_ head
     auto* old = sem.waiters_.load(std::memory_order_acquire);
     do {
         // Re-check count — might have been released between await_ready and now
         if (sem.try_acquire()) {
-            // Got a slot — don't suspend; free the allocated node.
-            delete node;
+            // Got a slot — don't suspend
             h.resume();
             return;
         }
-        node->next = old;
+        node.next = old;
     } while (!sem.waiters_.compare_exchange_weak(
-        old, node, std::memory_order_release, std::memory_order_acquire));
+        old, &node, std::memory_order_release, std::memory_order_acquire));
 }
 
 inline void AffinitySemaphore::release() noexcept {
@@ -131,12 +115,13 @@ inline void AffinitySemaphore::release() noexcept {
             auto* node = old;
             // If route is set and the waiter has a valid worker_id, route back
             // to the original worker for thread-affine wakeup.
-            if (route_ && node->worker_id != SIZE_MAX) {
-                route_(node->worker_id, node->handle);
+            // Note: node is embedded in AcquireAwaiter on the coroutine frame;
+            // it will be destroyed automatically when the coroutine completes.
+            if (node->route && node->worker_id != SIZE_MAX) {
+                node->route(node->worker_id, node->handle);
             } else {
                 node->handle.resume();
             }
-            delete node;
             return;
         }
     }

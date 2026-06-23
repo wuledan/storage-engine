@@ -110,16 +110,17 @@ void SPDKBackend::on_io_complete(void* arg, const spdk_nvme_cpl* cpl) {
         comp.result = static_cast<int64_t>(self->pending_[idx].len);
     }
 
-    // Move the user's callback into the completion record.
-    comp.callback = std::move(self->pending_[idx].callback);
+    // Invoke callback inline (zero allocation on coroutine frame).
+    // The callback fires synchronously inside poll()'s call to
+    // process_completions() — same thread, no reentrancy issue.
+    if (idx < self->pending_.size() && self->pending_[idx].callback_fn) {
+        self->pending_[idx].callback_fn(self->pending_[idx].callback_ctx, comp);
+    }
 
     if (self->completed_count_ < self->kCompletionBatch) {
-        self->completed_[self->completed_count_++] = std::move(comp);
+        self->completed_[self->completed_count_++] = comp;
     } else {
-        fprintf(stderr, "[SPDK] completion overflow! Firing inline.\n");
-        if (comp.callback) {
-            comp.callback(comp);
-        }
+        fprintf(stderr, "[SPDK] completion overflow! Dropping result.\n");
     }
 }
 
@@ -169,9 +170,8 @@ void SPDKBackend::free_dma_buffer(void* buf, size_t /*size*/) {
 
 namespace storage::io {
 
-SPDKBackend::SPDKBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route)
+SPDKBackend::SPDKBackend(const IOBackendConfig& cfg)
     : cfg_() {
-    set_route_fn(std::move(route));
 
     // ── Convert IOBackendConfig → backend Config ──
     cfg_.traddr = cfg.bdev_name;
@@ -333,22 +333,22 @@ void SPDKBackend::submit(IORequest req) {
             on_io_complete, reinterpret_cast<void*>(idx), 0);
         break;
     default:
-        if (pending_[idx].callback) {
+        if (pending_[idx].callback_fn) {
             IOCompletion comp;
             comp.result = -EINVAL;
-            comp.callback = std::move(pending_[idx].callback);
-            comp.callback(comp);
+            comp.user_data = idx;
+            pending_[idx].callback_fn(pending_[idx].callback_ctx, comp);
         }
         return;
     }
 
     if (rc != 0) {
         fprintf(stderr, "[SPDK] NVMe cmd failed at submit (rc=%d)\n", rc);
-        if (pending_[idx].callback) {
+        if (pending_[idx].callback_fn) {
             IOCompletion comp;
             comp.result = -rc;
-            comp.callback = std::move(pending_[idx].callback);
-            comp.callback(comp);
+            comp.user_data = idx;
+            pending_[idx].callback_fn(pending_[idx].callback_ctx, comp);
         }
     }
 }
@@ -361,7 +361,6 @@ size_t SPDKBackend::poll(IOCompletion* out, size_t max) {
                 ret);
         out[0].result = ret;
         out[0].user_data = 0;
-        out[0].callback = nullptr;
         return 1;
     }
     if (ret == 0) return 0;
@@ -381,22 +380,19 @@ namespace storage::io {
 
 SPDKBackend* SPDKBackend::instance_{nullptr};
 
-SPDKBackend::SPDKBackend(const IOBackendConfig& cfg, IIOBackend::RouteFn route)
+SPDKBackend::SPDKBackend(const IOBackendConfig& cfg)
     : cfg_() {
-    set_route_fn(std::move(route));
     // SPDK not available at compile time — will return -ENOSYS on use.
 }
 
 SPDKBackend::~SPDKBackend() = default;
 
 void SPDKBackend::submit(IORequest req) {
-    if (req.callback) {
+    if (req.callback_fn) {
         IOCompletion comp;
         comp.result = -ENOSYS;
         comp.user_data = 0;
-        comp.callback = std::move(req.callback);
-        req.callback = nullptr;
-        comp.callback(comp);
+        req.callback_fn(req.callback_ctx, comp);
     }
 }
 

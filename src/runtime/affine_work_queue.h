@@ -1,6 +1,6 @@
 #pragma once
 #include "work_queue.h"
-#include <folly/concurrency/UnboundedQueue.h>
+#include "mpmc_ring.h"
 #include <string>
 
 namespace storage::runtime {
@@ -25,8 +25,7 @@ public:
     const char* name() const noexcept override { return name_.c_str(); }
 
 private:
-    // folly::UMPMCQueue<WorkItem, false, 6> — false=NonBlocking, 6=segment bits
-    folly::UMPMCQueue<WorkItem, false, 6> queue_;
+    MPMCRing<WorkItem> queue_;
     QueueType type_;
     Priority priority_;
     std::string name_;

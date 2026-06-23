@@ -11,6 +11,31 @@
 using namespace storage::runtime;
 using namespace storage::io;
 
+namespace {
+
+// ── Helper callback contexts and handlers ──
+
+struct IncU64Ctx { std::atomic<uint64_t>* counter; };
+void inc_u64_callback(void* ctx, IOCompletion) {
+    auto* p = static_cast<IncU64Ctx*>(ctx);
+    p->counter->fetch_add(1);
+}
+
+struct IncSizeCtx { std::atomic<size_t>* counter; };
+void inc_size_callback(void* ctx, IOCompletion) {
+    auto* p = static_cast<IncSizeCtx*>(ctx);
+    p->counter->fetch_add(1);
+}
+
+struct CorrectnessCtx { std::atomic<size_t>* counter; };
+void correctness_callback(void* ctx, IOCompletion c) {
+    auto* p = static_cast<CorrectnessCtx*>(ctx);
+    ASSERT_EQ(c.result, 64);
+    p->counter->fetch_add(1);
+}
+
+}  // anonymous namespace
+
 // ============================================================================
 // 测试1: 持续高 IOPS 10s，无崩溃/无内存泄漏
 // ============================================================================
@@ -27,6 +52,7 @@ TEST(IOStressTest, SustainedHighIOPS_60s) {
     const auto duration = std::chrono::seconds(10);
     auto start = std::chrono::steady_clock::now();
     std::atomic<uint64_t> completed{0};
+    IncU64Ctx ctx{&completed};
     std::atomic<bool> stop{false};
 
     // 提交线程
@@ -40,7 +66,8 @@ TEST(IOStressTest, SustainedHighIOPS_60s) {
                 req.offset = (completed.load() + i) * 64;
                 req.buf = buf;
                 req.len = 64;
-                req.callback = [&completed](IOCompletion) { completed.fetch_add(1); };
+                req.callback_fn = inc_u64_callback;
+                req.callback_ctx = &ctx;
                 w.io_backend()->submit(std::move(req));
                 w.notify();  // 保持 scheduler 活跃
             }
@@ -91,6 +118,7 @@ TEST(IOStressTest, BurstSubmission) {
 
     const size_t N = 10000;  // 远超 queue_depth
     std::atomic<size_t> completed{0};
+    IncSizeCtx ctx{&completed};
     char buf[64] = "burst";
 
     for (size_t i = 0; i < N; ++i) {
@@ -100,7 +128,8 @@ TEST(IOStressTest, BurstSubmission) {
         req.offset = static_cast<uint64_t>(i) * 64;
         req.buf = buf;
         req.len = 64;
-        req.callback = [&completed](IOCompletion) { completed.fetch_add(1); };
+        req.callback_fn = inc_size_callback;
+        req.callback_ctx = &ctx;
         w.io_backend()->submit(std::move(req));
     }
 
@@ -133,6 +162,7 @@ TEST(IOStressTest, IoUringCorrectness) {
 
     const size_t N = 2000;
     std::atomic<size_t> done{0};
+    CorrectnessCtx ctx{&done};
     char buf[64] = "correctness";
 
     for (size_t i = 0; i < N; ++i) {
@@ -142,10 +172,8 @@ TEST(IOStressTest, IoUringCorrectness) {
         req.offset = static_cast<uint64_t>(i) * 64;
         req.buf = buf;
         req.len = 64;
-        req.callback = [&done](IOCompletion c) {
-            ASSERT_EQ(c.result, 64);
-            done.fetch_add(1);
-        };
+        req.callback_fn = correctness_callback;
+        req.callback_ctx = &ctx;
         w.io_backend()->submit(std::move(req));
     }
 

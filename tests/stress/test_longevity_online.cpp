@@ -40,17 +40,43 @@ struct LongevityLoop {
     std::coroutine_handle<promise_type> handle;
 };
 
+// ── Captureless callback context for io_loop ──
+struct IOCallbackCtx {
+    AffinityBaton*       baton;
+    std::atomic<uint32_t>* pending;
+    std::atomic<uint64_t>* total_io;
+    MetricLatency*       io_lat;
+    uint64_t             t0_ns;
+};
+
+static void io_loop_callback(void* ctx, IOCompletion /*comp*/) {
+    auto* c = static_cast<IOCallbackCtx*>(ctx);
+    auto now = high_resolution_clock::now();
+    auto lat = duration_cast<nanoseconds>(
+        now.time_since_epoch() - nanoseconds(c->t0_ns)).count();
+    *c->io_lat << lat;
+    c->total_io->fetch_add(1, std::memory_order_relaxed);
+    if (c->pending->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        c->baton->post_direct();
+    }
+}
+
 // ============================================================================
 // io_loop — per-worker coroutine that continuously submits QD=32 4K writes
 //
 // Each iteration:
 //   1. Creates a shared AffinityBaton (shared_ptr so callbacks keep it alive)
-//   2. Submits 32 write requests, each capturing its own timestamp t0
+//   2. Submits 32 write requests, each with its own callback context on the
+//      coroutine frame containing timestamp and shared state pointers.
 //   3. Flushes submissions to the io_uring SQ
 //   4. Suspends (co_await) until the baton is posted
 //
 // The last completion callback posts the baton, which resumes this coroutine.
 // Latency samples are recorded into the shared MetricLatency histogram.
+//
+// Note: IOCallbackCtx objects live on the coroutine frame (array of 32
+// embedded in the loop body). No heap allocation beyond the initial
+// AffinityBaton shared_ptr for post_direct concurrency.
 // ============================================================================
 static LongevityLoop io_loop(OnlineWorker& worker, int fd, void* buf,
                               std::atomic<bool>& stop,
@@ -58,28 +84,26 @@ static LongevityLoop io_loop(OnlineWorker& worker, int fd, void* buf,
                               MetricLatency& io_lat) {
     uint64_t offset = 0;
     while (!stop.load(std::memory_order_relaxed)) {
-        // Baton lives as long as any callback holds a shared_ptr to it.
         auto baton = std::make_shared<AffinityBaton>();
         std::atomic<uint32_t> pending{32};
+        // Per-request contexts on the coroutine frame (zero heap allocation)
+        IOCallbackCtx ctxs[32];
 
         for (uint32_t q = 0; q < 32; ++q) {
             auto t0 = high_resolution_clock::now();
+            ctxs[q] = IOCallbackCtx{
+                baton.get(), &pending, &total_io, &io_lat,
+                static_cast<uint64_t>(t0.time_since_epoch().count())
+            };
+
             IORequest req;
             req.op = IORequest::kWrite;
             req.fd = fd;
             req.offset = offset * 4096ULL;
             req.buf = buf;
             req.len = 4096;
-            req.callback = [baton, &pending, &total_io, &io_lat, t0](
-                IOCompletion /*comp*/) {
-                auto lat = duration_cast<nanoseconds>(
-                    high_resolution_clock::now() - t0).count();
-                io_lat << lat;
-                total_io.fetch_add(1, std::memory_order_relaxed);
-                if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                    baton->post_direct();
-                }
-            };
+            req.callback_fn = io_loop_callback;
+            req.callback_ctx = &ctxs[q];
             worker.io_backend()->submit(std::move(req));
             offset++;
         }

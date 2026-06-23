@@ -30,9 +30,8 @@ struct ScopedLockAwaiter;
 //
 // API parity with folly::coro::Mutex:
 //   co_await mutex.co_lock()   -- acquire exclusive lock (coroutine)
-//   mutex.co_scoped_lock()     -- acquire and return RAII guard
-//   mutex.try_lock()           -- non-blocking try
-//   mutex.unlock()             -- release (called by guard)
+//   mutex.unlock()             -- release (called by guard / AffinityScopedLock)
+//   auto guard = co_await mutex.co_scoped_lock()  -- RAII guard (coroutine)
 //
 class AffinityMutex {
 public:
@@ -60,6 +59,7 @@ public:
     struct Waiter {
         std::coroutine_handle<> handle;
         size_t worker_id;  // waiter's worker_id (SIZE_MAX = external thread)
+        RouteFunc route;   // how to resume this waiter on its worker
         Waiter* next;
     };
 
@@ -81,6 +81,7 @@ public:
         bool await_suspend(std::coroutine_handle<> handle) noexcept {
             node.handle = handle;
             node.worker_id = current_worker_id();
+            node.route = get_current_route();
             node.next = nullptr;
 
             // We failed to acquire the lock (await_ready returned false).
@@ -137,77 +138,13 @@ public:
         return LockAwaiter{*this, Waiter{}};
     }
 
-    // ── Non-coroutine lock — std::lock_guard / std::unique_lock compatible ──
-    //
-    // SAFETY: Only safe when caller and lock holder are on the SAME worker thread.
-    // In multi-worker (offline) scenarios, use co_await mutex.co_lock() instead.
-    // This method spin-waits — calling it cross-worker will deadlock.
-    //
-    void lock() noexcept {
-        while (!try_lock()) {
-            while (state_.load(std::memory_order_relaxed) & kLockedFlag) {
-                __builtin_ia32_pause();
-            }
-        }
-    }
-
-    // ── RAII lock guard ──
-
-    class AffinityMutexLock {
-    public:
-        explicit AffinityMutexLock(AffinityMutex& mutex) noexcept
-            : mutex_(&mutex) {}
-
-        ~AffinityMutexLock() {
-            if (mutex_) {
-                mutex_->unlock();
-            }
-        }
-
-        AffinityMutexLock(const AffinityMutexLock&) = delete;
-        AffinityMutexLock& operator=(const AffinityMutexLock&) = delete;
-
-        AffinityMutexLock(AffinityMutexLock&& other) noexcept
-            : mutex_(other.mutex_) {
-            other.mutex_ = nullptr;
-        }
-
-        AffinityMutexLock& operator=(AffinityMutexLock&& other) noexcept {
-            if (this != &other) {
-                if (mutex_) {
-                    mutex_->unlock();
-                }
-                mutex_ = other.mutex_;
-                other.mutex_ = nullptr;
-            }
-            return *this;
-        }
-
-    private:
-        AffinityMutex* mutex_;
-    };
-
     // ── co_scoped_lock(): acquire and return RAII guard via co_await ──
     // Usage: auto guard = co_await mutex.co_scoped_lock();
     ScopedLockAwaiter co_scoped_lock() noexcept;
 
-    // ── try_lock(): non-blocking try ──
-
-    bool try_lock() noexcept {
-        uintptr_t expected = 0;
-        return state_.compare_exchange_strong(
-            expected, kLockedFlag,
-            std::memory_order_acquire,
-            std::memory_order_relaxed);
-    }
-
     // ── unlock(): release lock, wake next waiter if any ──
 
     void unlock();
-
-    // ── 设置路由回调（用于线程亲和唤醒） ──
-
-    void set_route(RouteFunc route) { route_ = std::move(route); }
 
 private:
     static size_t current_worker_id();
@@ -224,7 +161,6 @@ private:
     // struct with pointer + size_t members), so bit 0 is safe for the flag.
     std::atomic<uintptr_t> state_{0};
 
-    RouteFunc route_;  // 路由回调，unlock() 中唤醒 waiter 时使用
 };
 
 // ── Scoped RAII guard ──

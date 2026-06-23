@@ -6,9 +6,8 @@
 
 namespace storage::io {
 
-LibaioBackend::LibaioBackend(size_t queue_depth, IIOBackend::RouteFn route)
+LibaioBackend::LibaioBackend(size_t queue_depth)
     : queue_depth_(queue_depth) {
-    set_route_fn(std::move(route));
     pending_.resize(queue_depth_ * 2);
     iocbs_.resize(1);
 
@@ -54,11 +53,11 @@ void LibaioBackend::submit(IORequest req) {
     int ret = io_submit(ctx_, 1, cbs);
     if (ret < 0) {
         // 提交失败，通过 callback 通知
-        if (pending_[idx].callback) {
+        if (pending_[idx].callback_fn) {
             IOCompletion comp;
             comp.result = ret;
-            comp.callback = std::move(pending_[idx].callback);
-            comp.callback(comp);
+            comp.user_data = idx;
+            pending_[idx].callback_fn(pending_[idx].callback_ctx, comp);
         }
     }
 }
@@ -81,8 +80,8 @@ size_t LibaioBackend::poll(IOCompletion* out, size_t max) {
         uint64_t idx = reinterpret_cast<uint64_t>(events[i].data);
         out[i].result = events[i].res;
         out[i].user_data = idx;
-        if (idx < pending_.size()) {
-            out[i].callback = std::move(pending_[idx].callback);
+        if (idx < pending_.size() && pending_[idx].callback_fn) {
+            pending_[idx].callback_fn(pending_[idx].callback_ctx, out[i]);
         }
     }
 
