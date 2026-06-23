@@ -85,7 +85,6 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     : Worker(cfg) {
     // Warmup 内存池
     memory_resource().warmup(4 * 1024 * 1024);  // 4MB
-    work_item_pool().warmup(1024);
     idx_affine_ = add_queue(std::make_unique<RingWorkQueue>(
         QueueType::kAffine, Priority::kCritical, "affine", 65536));
     scheduler().set_affine_idx(idx_affine_);

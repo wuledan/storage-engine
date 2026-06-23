@@ -90,12 +90,3 @@ TEST(PerfTest, MultipleQueuesIndependent) {
     EXPECT_GE(snap.queues.size(), 3);
 }
 
-// ============================================================================
-// 测试8: WorkItem reset 清除 enqueue_ns
-// ============================================================================
-TEST(PerfTest, ResetClearsEnqueueNs) {
-    WorkItem item;
-    item.enqueue_ns = 12345;
-    item.reset();
-    EXPECT_EQ(item.enqueue_ns, 0);
-}

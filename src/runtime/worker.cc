@@ -199,8 +199,7 @@ Worker::Worker(Config cfg)
       idle_(std::make_unique<AdaptiveIdle>(cfg_.idle_cfg)),
       policy_(make_policy(cfg_.policy_cfg)),
       scheduler_(policy_.get(), idle_.get()),
-      mem_pool_(std::make_unique<adapt::QuantMemoryResource>()),
-      work_item_pool_(std::make_unique<adapt::ObjectPool<WorkItem>>()),
+      mem_pool_(std::make_unique<adapt::MemoryPool>()),
       perf_(id_) {
     scheduler_.set_perf(&perf_);
 }

@@ -109,7 +109,7 @@ sanitizer_add(test_longevity_offline)
 include(GoogleTest)
 gtest_discover_tests(test_longevity_offline)
 
-# Pool throughput benchmark (lock-free QuantMemoryResource)
+# Pool throughput benchmark (lock-free MemoryPool)
 add_executable(test_pool_bench test_pool_bench.cpp)
 target_link_libraries(test_pool_bench
     PRIVATE

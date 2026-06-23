@@ -4,9 +4,9 @@
 #include "scheduling_policy.h"
 #include "policy_factory.h"
 #include "worker_perf.h"
-#include "object_pool.h"
 #include "memory_pool.h"
 #include "affinity_baton.h"
+#include <cassert>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -91,9 +91,7 @@ protected:
         h.resume();
     }
 
-    adapt::QuantMemoryResource& memory_resource() { return *mem_pool_; }
-    adapt::ObjectPool<WorkItem>& work_item_pool() { return *work_item_pool_; }
-
+    adapt::MemoryPool& memory_resource() { return *mem_pool_; }
 private:
     void worker_loop();
 
@@ -107,8 +105,7 @@ private:
     std::thread thread_;
     size_t affine_q_idx_{SIZE_MAX};
 
-    std::unique_ptr<adapt::QuantMemoryResource> mem_pool_;
-    std::unique_ptr<adapt::ObjectPool<WorkItem>> work_item_pool_;
+    std::unique_ptr<adapt::MemoryPool> mem_pool_;
 
     WorkerPerf perf_;  // 性能计数（初始化时传递 id_）
 };

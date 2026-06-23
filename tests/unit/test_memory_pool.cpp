@@ -3,7 +3,6 @@
 #include <chrono>
 #include "runtime/worker.h"
 #include "runtime/online_worker.h"
-#include "runtime/object_pool.h"
 #include "runtime/memory_pool.h"
 
 using namespace storage::runtime;
@@ -20,30 +19,10 @@ TEST(MemoryPoolTest, WorkerInitializesPool) {
 }
 
 // ============================================================================
-// 测试2: ObjectPool acquire/release
-// ============================================================================
-TEST(MemoryPoolTest, ObjectPoolAcquireRelease) {
-    ObjectPool<WorkItem> pool;
-    pool.warmup(100);
-
-    auto item = pool.acquire();
-    EXPECT_NE(item, nullptr);
-    item->tag = 1;
-    item->trace_id = 42;
-
-    // release：shared_ptr 析构时回到池
-    item.reset();
-
-    // 从池再获取
-    auto item2 = pool.acquire();
-    EXPECT_NE(item2, nullptr);
-}
-
-// ============================================================================
 // 测试3: MemoryPool warmup 和 allocate
 // ============================================================================
 TEST(MemoryPoolTest, MemoryPoolAllocate) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(1024 * 1024);  // 1MB
 
     void* ptr = pool.allocate(256, 8);

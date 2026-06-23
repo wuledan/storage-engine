@@ -271,8 +271,8 @@ private:
     LocalFreeList free_lists_[kNumSizeClasses];  // inline array, no heap indirection
 };
 
-// ── QuantMemoryResource::Impl ──
-class QuantMemoryResource::Impl {
+// ── MemoryPool::Impl ──
+class MemoryPool::Impl {
 public:
     explicit Impl(const SmallObjectConfig& cfg)
         : config_(cfg)
@@ -487,24 +487,24 @@ private:
     AtomicStats stats_;
 };
 
-QuantMemoryResource::QuantMemoryResource(const SmallObjectConfig& cfg)
+MemoryPool::MemoryPool(const SmallObjectConfig& cfg)
     : impl_(std::make_unique<Impl>(cfg)) {}
 
-QuantMemoryResource::~QuantMemoryResource() = default;
+MemoryPool::~MemoryPool() = default;
 
-void QuantMemoryResource::warmup(size_t total_bytes) {
+void MemoryPool::warmup(size_t total_bytes) {
     impl_->warmup(total_bytes);
 }
 
-MemoryPoolStats QuantMemoryResource::stats() const noexcept {
+MemoryPoolStats MemoryPool::stats() const noexcept {
     return impl_->stats();
 }
 
-void* QuantMemoryResource::allocate(size_t bytes, size_t alignment) {
+void* MemoryPool::allocate(size_t bytes, size_t alignment) {
     return impl_->allocate(bytes, alignment);
 }
 
-void QuantMemoryResource::deallocate(void* ptr, size_t bytes, size_t alignment) {
+void MemoryPool::deallocate(void* ptr, size_t bytes, size_t alignment) {
     impl_->deallocate(ptr, bytes, alignment);
 }
 

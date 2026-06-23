@@ -1,6 +1,6 @@
 // test_pool_numa.cpp — Per-NUMA shared pool multi-thread correctness & scaling
 //
-// Validates that QuantMemoryResource is safe under concurrent multi-threaded
+// Validates that MemoryPool is safe under concurrent multi-threaded
 // access patterns that mimic a per-NUMA shared pool (one pool, many threads).
 //
 // Scenarios:
@@ -38,7 +38,7 @@ static uint64_t now_ns() {
 // =============================================================================
 
 TEST(PoolNUMA, ConcurrentAllocFree) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(64 * 1024 * 1024);
 
     constexpr int kThreads = 8;
@@ -72,7 +72,7 @@ TEST(PoolNUMA, ConcurrentAllocFree) {
 // =============================================================================
 
 TEST(PoolNUMA, HoldAndRelease) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(64 * 1024 * 1024);
 
     constexpr int kThreads = 4;
@@ -117,7 +117,7 @@ TEST(PoolNUMA, HoldAndRelease) {
 // =============================================================================
 
 TEST(PoolNUMA, ThroughputScaling) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(64 * 1024 * 1024);
 
     constexpr size_t N = 500'000;

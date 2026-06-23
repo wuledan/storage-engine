@@ -36,10 +36,10 @@ struct MemoryPoolStats {
 };
 
 // ── Main memory pool ──
-class QuantMemoryResource {  // ← no longer inherits std::pmr::memory_resource
+class MemoryPool {  // ← no longer inherits std::pmr::memory_resource
 public:
-    explicit QuantMemoryResource(const SmallObjectConfig& cfg = {});
-    ~QuantMemoryResource();
+    explicit MemoryPool(const SmallObjectConfig& cfg = {});
+    ~MemoryPool();
 
     // ── Sync interface (per-Worker, single-threaded, no contention) ──
     void* allocate(size_t bytes, size_t alignment = alignof(std::max_align_t));

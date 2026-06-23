@@ -1,4 +1,4 @@
-// test_pool_bench.cpp — QuantMemoryResource throughput benchmarks
+// test_pool_bench.cpp — MemoryPool throughput benchmarks
 //
 // Measures pure allocation, round-trip, random-size mix, multi-thread
 // contention, and steady-state throughput of the lock-free memory pool.
@@ -32,7 +32,7 @@ static uint64_t now_ns() {
 // =============================================================================
 
 TEST(PoolBench, SingleThreadAllocOnly) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(4 * 1024 * 1024);
 
     constexpr size_t N = 1'000'000;
@@ -68,7 +68,7 @@ TEST(PoolBench, SingleThreadAllocOnly) {
 // =============================================================================
 
 TEST(PoolBench, SingleThreadRoundTrip) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(4 * 1024 * 1024);
 
     constexpr size_t N = 1'000'000;
@@ -102,7 +102,7 @@ TEST(PoolBench, SingleThreadRoundTrip) {
 // =============================================================================
 
 TEST(PoolBench, RandomSizeMix) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(16 * 1024 * 1024);
 
     constexpr size_t N = 1'000'000;
@@ -140,7 +140,7 @@ TEST(PoolBench, RandomSizeMix) {
 // =============================================================================
 
 TEST(PoolBench, MultiThreadContention) {
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(64 * 1024 * 1024);
 
     constexpr size_t N = 200'000;
@@ -176,7 +176,7 @@ TEST(PoolBench, MultiThreadContention) {
 TEST(PoolBench, SteadyStateThroughput) {
     // Simulate real-world scenario: 128 active items cycling in the pool.
     // Continuously alloc-free-alloc-free, measuring steady-state throughput.
-    QuantMemoryResource pool;
+    MemoryPool pool;
     pool.warmup(4 * 1024 * 1024);
 
     constexpr size_t kPoolSize = 128;    // active objects in flight
