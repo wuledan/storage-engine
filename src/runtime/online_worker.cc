@@ -100,18 +100,37 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
         QueueType::kTimer, Priority::kHigh, "timer"));
     set_policy(make_policy(PolicyConfig{"strict_priority"}));
 
-    // Launch timer coroutine in P4 (timer) queue.
-    // Set TLS so that co_await yield_to(idx_timer_) inside timer_coro_fn
-    // can enqueue the coroutine back to the timer queue even before the
-    // worker loop starts (current_worker() returns null during construction).
-    tls_source_queue_idx = idx_timer_;
-    tls_source_queue = get_queue(idx_timer_);
+    // Create the timer coroutine, save the handle, but do NOT resume yet.
+    // Resume is deferred to on_worker_start(), at which point TLS is already
+    // set up (current_worker() returns non-null) so yield/yield_to routing
+    // works without manual TLS manipulation.
     auto timer_coro = timer_coro_fn(this);
-    tls_source_queue_idx = SIZE_MAX;
-    tls_source_queue = nullptr;
-    auto timer_h = timer_coro.release();
-    timer_handle_ = timer_h;
-    timer_h.resume();  // Start the timer loop — will run until yield, then self-manage
+    timer_handle_ = timer_coro.release();
+}
+
+void OnlineWorker::on_worker_start() {
+    // Worker TLS is now set up (tls_worker_id, tls_current_worker, etc.).
+    // Safely resume persistent coroutines that were created during
+    // construction/init but deferred.
+    //
+    // Set tls_source_queue_idx before each resume so the first co_await
+    // yield()/yield_to() inside each coroutine routes back to its correct
+    // queue.  After that, the Scheduler manages tls_source_queue_idx
+    // before each execute() call, so subsequent yields route correctly.
+    if (timer_handle_) {
+        tls_source_queue_idx = idx_timer_;
+        tls_source_queue = get_queue(idx_timer_);
+        timer_handle_.resume();
+        tls_source_queue_idx = SIZE_MAX;
+        tls_source_queue = nullptr;
+    }
+    if (io_handle_) {
+        tls_source_queue_idx = idx_disk_io_;
+        tls_source_queue = get_queue(idx_disk_io_);
+        io_handle_.resume();
+        tls_source_queue_idx = SIZE_MAX;
+        tls_source_queue = nullptr;
+    }
 }
 
 OnlineWorker::~OnlineWorker() {
@@ -168,18 +187,11 @@ void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     io_backend_ = io::IOEngine::create(cfg);
     scheduler().set_io_backend(io_backend_.get());
 
-    // Set tls_source_queue_idx + tls_source_queue so yield() inside
-    // io_poll_coro_fn routes back to disk_io (P1) — avoids any
-    // current_worker() dependency since this runs on the test/main thread
-    // before the worker loop starts.
-    tls_source_queue_idx = idx_disk_io_;
-    tls_source_queue = get_queue(idx_disk_io_);
+    // Create the IO poll coroutine, save the handle, but do NOT resume yet.
+    // Resume is deferred to on_worker_start() so that TLS (current_worker())
+    // is available for yield/yield_to routing inside io_poll_coro_fn.
     auto io_coro = io_poll_coro_fn(this);
-    tls_source_queue_idx = SIZE_MAX;  // reset
-    tls_source_queue = nullptr;
-    auto io_h = io_coro.release();
-    io_handle_ = io_h;
-    io_h.resume();  // Start the IO poll loop — will run until yield, then self-manage
+    io_handle_ = io_coro.release();
 }
 
 adapt::Task<io::IOCompletion> OnlineWorker::co_read(

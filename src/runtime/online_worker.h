@@ -80,6 +80,9 @@ public:
 
     TaskDispatchMode dispatch_mode() const { return dispatch_mode_; }
 
+    // ── Worker lifecycle hook ──
+    void on_worker_start() override;
+
     // ── IO Backend ──
     void init_io_backend(const io::IOBackendConfig& cfg);
     io::IIOBackend* io_backend() { return io_backend_.get(); }
