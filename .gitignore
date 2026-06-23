@@ -43,6 +43,8 @@
 build/
 Build/
 build-*/
+build_baseline/
+build_sanitized/
 
 # CMake generated files
 CMakeFiles/
