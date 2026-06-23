@@ -78,7 +78,7 @@ public:
                 std::memory_order_relaxed);
         }
 
-        bool await_suspend(std::coroutine_handle<> handle) noexcept {
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle) noexcept {
             node.handle = handle;
             node.worker_id = current_worker_id();
             node.route = get_current_route();
@@ -99,7 +99,7 @@ public:
                             std::memory_order_acquire,
                             std::memory_order_relaxed)) {
                         // Got the lock, don't suspend
-                        return false;
+                        return handle;
                     }
                     // CAS failed, someone else grabbed it. old_state is updated.
                     continue;
@@ -119,7 +119,7 @@ public:
                         std::memory_order_release,
                         std::memory_order_acquire)) {
                     // Successfully enqueued; suspend.
-                    return true;
+                    return std::noop_coroutine();
                 }
                 // CAS failed, state changed. old_state is updated. Retry.
                 // Note: waiter_ptr->next may be stale now, but it will be
@@ -198,7 +198,7 @@ struct ScopedLockAwaiter {
     AffinityMutex::LockAwaiter inner;
 
     bool await_ready() const noexcept { return inner.await_ready(); }
-    void await_suspend(std::coroutine_handle<> h) noexcept { inner.await_suspend(h); }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept { return inner.await_suspend(h); }
     AffinityScopedLock await_resume() noexcept { return AffinityScopedLock(mtx); }
 };
 

@@ -55,16 +55,10 @@ public:
     // ── Stats ──
     MemoryPoolStats stats() const noexcept;
 
-    // ── Reset ──
-    void reset() noexcept;
-
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-
-// ── Global singleton ──
-QuantMemoryResource& global_memory_resource();
 
 // ── Convenience ──
 template<typename T, typename... Args>

@@ -382,6 +382,7 @@ public:
         if (alignment > alignof(std::max_align_t)) {
             alloc_size = (alloc_size + alignment - 1) & ~(alignment - 1);
         }
+        stats_.total_freed.fetch_add(alloc_size, std::memory_order_relaxed);
 
         // Small object — return to thread-local cache (or overflow to return ring)
         if (alloc_size <= kSmallObjectMax) {
@@ -426,14 +427,6 @@ public:
         s.current_in_use = s.total_allocated - s.total_freed;
         s.peak_usage = stats_.peak_usage.load(std::memory_order_relaxed);
         return s;
-    }
-
-    void reset() noexcept {
-        // Don't free underlying blocks — just clear free lists
-        for (size_t i = 0; i < kNumSizeClasses; ++i) {
-            // Note: This is a simple implementation. Production would
-            // track objects more carefully.
-        }
     }
 
 private:
@@ -507,21 +500,12 @@ MemoryPoolStats QuantMemoryResource::stats() const noexcept {
     return impl_->stats();
 }
 
-void QuantMemoryResource::reset() noexcept {
-    impl_->reset();
-}
-
 void* QuantMemoryResource::allocate(size_t bytes, size_t alignment) {
     return impl_->allocate(bytes, alignment);
 }
 
 void QuantMemoryResource::deallocate(void* ptr, size_t bytes, size_t alignment) {
     impl_->deallocate(ptr, bytes, alignment);
-}
-
-QuantMemoryResource& global_memory_resource() {
-    static QuantMemoryResource instance;
-    return instance;
 }
 
 }  // namespace storage::runtime::adapt

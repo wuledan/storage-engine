@@ -46,7 +46,7 @@ public:
             return sem.try_acquire();
         }
 
-        void await_suspend(std::coroutine_handle<> h) noexcept;
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept;
         void await_resume() const noexcept {}
     };
 
@@ -81,7 +81,7 @@ inline bool AffinitySemaphore::try_acquire() noexcept {
     return false;
 }
 
-inline void AffinitySemaphore::AcquireAwaiter::await_suspend(
+inline std::coroutine_handle<> AffinitySemaphore::AcquireAwaiter::await_suspend(
     std::coroutine_handle<> h) noexcept {
     // WaiterNode is embedded in AcquireAwaiter (on the coroutine frame),
     // no heap allocation needed.
@@ -96,12 +96,12 @@ inline void AffinitySemaphore::AcquireAwaiter::await_suspend(
         // Re-check count — might have been released between await_ready and now
         if (sem.try_acquire()) {
             // Got a slot — don't suspend
-            h.resume();
-            return;
+            return h;
         }
         node.next = old;
     } while (!sem.waiters_.compare_exchange_weak(
         old, &node, std::memory_order_release, std::memory_order_acquire));
+    return std::noop_coroutine();
 }
 
 inline void AffinitySemaphore::release() noexcept {

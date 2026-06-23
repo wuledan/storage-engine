@@ -111,7 +111,14 @@ OnlineWorker::OnlineWorker(const Worker::Config& cfg)
     tls_source_queue_idx = SIZE_MAX;
     tls_source_queue = nullptr;
     auto timer_h = timer_coro.release();
+    timer_handle_ = timer_h;
     timer_h.resume();  // Start the timer loop — will run until yield, then self-manage
+}
+
+OnlineWorker::~OnlineWorker() {
+    // Worker loop has already exited — safe to destroy coroutine frames.
+    if (timer_handle_) timer_handle_.destroy();
+    if (io_handle_) io_handle_.destroy();
 }
 
 void OnlineWorker::submit_engine(WorkItem item) {
@@ -172,6 +179,7 @@ void OnlineWorker::init_io_backend(const io::IOBackendConfig& cfg) {
     tls_source_queue_idx = SIZE_MAX;  // reset
     tls_source_queue = nullptr;
     auto io_h = io_coro.release();
+    io_handle_ = io_h;
     io_h.resume();  // Start the IO poll loop — will run until yield, then self-manage
 }
 

@@ -133,7 +133,7 @@ public:
             return baton.ready();
         }
 
-        void await_suspend(std::coroutine_handle<> handle) noexcept {
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle) noexcept {
             node.handle = handle;
             node.worker_id = current_worker_id();
             node.route = get_current_route();
@@ -146,14 +146,14 @@ public:
             do {
                 if (reinterpret_cast<uintptr_t>(old) & kPostedBit) {
                     // Already posted — don't suspend
-                    handle.resume();
-                    return;
+                    return handle;
                 }
                 node.next = clear_posted(old);
             } while (!baton.waiters_.compare_exchange_weak(
                 old, &node,
                 std::memory_order_release,
                 std::memory_order_acquire));
+            return std::noop_coroutine();
         }
 
         void await_resume() const noexcept {}
@@ -180,7 +180,7 @@ public:
         }
 
         // Defined in worker.cc (needs timer.h, online_worker.h, etc.)
-        void await_suspend(std::coroutine_handle<> h) noexcept;
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept;
 
         WaitResult await_resume() const noexcept {
             return state.timed_out.load(std::memory_order_acquire)

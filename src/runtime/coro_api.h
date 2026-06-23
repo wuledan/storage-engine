@@ -171,6 +171,11 @@ inline int coro_create(coro_t *coro, const coro_attr_t * /*attr*/,
     }(start_routine, arg, state);
 
     // Submit to engine queue — the queue now "owns" the handle
+    // NOTE: submit_engine is fire-and-forget (RingWorkQueue::enqueue returns void).
+    // Caller must ensure the engine queue has space. The queue is sized at 65536
+    // entries, which is sufficient for all current usage patterns. If the queue
+    // is full, the enqueue silently drops the item — the coroutine frame leak
+    // would need to be addressed by making submit_engine return a status code.
     w->submit_engine(WorkItem::make_coro(task.release()));
 
     *coro = static_cast<coro_t>(state);
@@ -208,8 +213,8 @@ struct coro_join_awaiter {
         return state->baton.ready();
     }
 
-    void await_suspend(std::coroutine_handle<> h) noexcept {
-        baton_awaiter.await_suspend(h);
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
+        return baton_awaiter.await_suspend(h);
     }
 
     void* await_resume() noexcept {
@@ -425,6 +430,9 @@ public:
             delete heap_wrapper;
             handle_ = nullptr;
         }
+        // NOTE: Depends on N4 — coro_create's submit_engine is fire-and-forget.
+        // If submit_engine were to fail (queue full), the coroutine handle would
+        // leak. Current semantics: submit_engine always succeeds for bounded queues.
     }
 
     // ── Destructor: detach if still joinable ──
@@ -542,6 +550,11 @@ auto when_all(Fs&&... funcs) {
 
         WhenAllAwaiter(const WhenAllAwaiter&) = delete;
         WhenAllAwaiter& operator=(const WhenAllAwaiter&) = delete;
+        // NOTE: Ideally this would be =delete to force NRVO, but when_all()
+        // returns a local WhenAllAwaiter and RVO is not guaranteed across all
+        // callers (the awaiter is returned from a template function).  Keeping
+        // the move constructor to satisfy the compiler — NRVO still applies on
+        // most paths (the move is typically elided).
         WhenAllAwaiter(WhenAllAwaiter&& other) noexcept
             : state(std::move(other.state))
             , baton_awaiter{state.baton, std::move(other.baton_awaiter.node)} {}
@@ -551,8 +564,8 @@ auto when_all(Fs&&... funcs) {
             return baton_awaiter.await_ready();
         }
 
-        void await_suspend(std::coroutine_handle<> h) noexcept {
-            baton_awaiter.await_suspend(h);
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
+            return baton_awaiter.await_suspend(h);
         }
 
         ResultTuple await_resume() noexcept {

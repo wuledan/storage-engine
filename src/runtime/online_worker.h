@@ -23,6 +23,7 @@ enum class TaskDispatchMode : uint8_t {
 class OnlineWorker : public Worker {
 public:
     explicit OnlineWorker(const Worker::Config& cfg);
+    ~OnlineWorker() override;
 
     // 向特定队列投递任务
     void submit_engine(WorkItem item);
@@ -105,6 +106,8 @@ public:
 private:
     TaskDispatchMode dispatch_mode_{TaskDispatchMode::kDirect};
     WorkerTimerState timer_state_;
+    std::coroutine_handle<> timer_handle_{nullptr};
+    std::coroutine_handle<> io_handle_{nullptr};
 };
 
 // ============================================================================

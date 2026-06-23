@@ -102,7 +102,11 @@ public:
         for (size_t i = 0; i < n; ++i)
             objs[i] = ring_[(cons_head + i) & mask_];
 
-        // 更新 tail (无需 CAS，当前消费者独占总槽位)
+        // DPDK 风格 tail 等待循环:
+        // 前序消费者可能尚未完成拷贝，必须等 cons_.tail == cons_head 才能更新
+        while (cons_.tail.load(std::memory_order_acquire) != cons_head) {
+            __builtin_ia32_pause();
+        }
         cons_.tail.store(cons_next, std::memory_order_release);
         return n;
     }

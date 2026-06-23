@@ -128,33 +128,41 @@ void AffinityMutex::unlock() {
 // Each waiter's route is saved in node.route during registration, so the
 // timer callback does not need to carry its own RouteFunc — it just calls
 // baton.post(), which uses each waiter's own saved route.
-void AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexcept {
+std::coroutine_handle<> AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexcept {
     node.handle = h;
     node.worker_id = detail::get_current_worker_id();
     node.route = get_current_route();
     node.next = nullptr;
 
-    // 1. Register with baton (same CAS chain logic as Awaiter)
+    // 0. Zero / negative timeout → immediate timeout, never enqueue
+    if (timeout <= Duration::zero()) {
+        state.timed_out.store(true, std::memory_order_release);
+        return h;  // symmetric transfer — resume immediately, result = kTimeout
+    }
+
+    // 1. Check timer context availability BEFORE enqueuing.
+    //    If neither OnlineWorker nor WSE timer context is available, we cannot
+    //    schedule a timeout — signal timeout immediately.
+    bool has_timer = (current_online_worker() != nullptr)
+                  || (WorkStealingExecutor::current_executor() != nullptr);
+    if (!has_timer) {
+        state.timed_out.store(true, std::memory_order_release);
+        return h;  // symmetric transfer — resume immediately, result = kTimeout
+    }
+
+    // 2. Register with baton (same CAS chain logic as Awaiter)
     auto* old = baton.waiters_.load(std::memory_order_acquire);
     do {
         if (reinterpret_cast<uintptr_t>(old) & kPostedBit) {
             // Already posted — don't suspend
             result = WaitResult::kSignaled;
-            h.resume();
-            return;
+            return h;
         }
         node.next = clear_posted(old);
     } while (!baton.waiters_.compare_exchange_weak(
         old, &node,
         std::memory_order_release,
         std::memory_order_acquire));
-
-    // 2. Zero / negative timeout → immediate timeout
-    if (timeout <= Duration::zero()) {
-        state.timed_out.store(true, std::memory_order_release);
-        baton.post_direct();
-        return;
-    }
 
     // 3. Register with timer system
     Clock::time_point deadline = Clock::now() + timeout;
@@ -174,13 +182,11 @@ void AffinityBaton::TimedAwaiter::await_suspend(std::coroutine_handle<> h) noexc
 
     if (auto* ow = current_online_worker()) {
         ow->timer_state().insert(std::move(tn));
-    } else if (WorkStealingExecutor::current_executor()) {
-        global_offline_timer().insert(std::move(tn));
     } else {
-        // No timer context — signal timeout immediately
-        state.timed_out.store(true, std::memory_order_release);
-        baton.post_direct();
+        // Must be WorkStealingExecutor (checked above)
+        global_offline_timer().insert(std::move(tn));
     }
+    return std::noop_coroutine();
 }
 
 }  // namespace adapt

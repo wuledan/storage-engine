@@ -209,23 +209,4 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
-// ── Typical usage example ──
-struct MarketSnapshot {
-    std::string symbol;
-    double bid_price = 0.0;
-    double ask_price = 0.0;
-    int64_t bid_volume = 0;
-    int64_t ask_volume = 0;
-    int64_t timestamp_ns = 0;
-
-    void reset() {
-        symbol.clear();
-        bid_price = ask_price = 0.0;
-        bid_volume = ask_volume = 0;
-        timestamp_ns = 0;
-    }
-};
-
-using SnapshotPool = ObjectPool<MarketSnapshot>;
-
 }  // namespace storage::runtime::adapt

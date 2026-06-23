@@ -10,13 +10,8 @@ function(add_stress_test TEST_NAME TEST_SOURCE)
             runtime
             GTest::gtest_main
             GTest::gtest
-            Folly::folly
             Threads::Threads
     )
-    target_include_directories(${TEST_NAME} PRIVATE ${FOLLY_INCLUDE_DIR})
-    if(FOLLY_BUILD_INCLUDE_DIR)
-        target_include_directories(${TEST_NAME} PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-    endif()
     sanitizer_add(${TEST_NAME})
     include(GoogleTest)
     gtest_discover_tests(${TEST_NAME})
@@ -32,15 +27,10 @@ target_link_libraries(test_benchmark
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
     target_link_libraries(test_benchmark PRIVATE ${LIBURING})
-endif()
-target_include_directories(test_benchmark PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_benchmark PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
 endif()
 sanitizer_add(test_benchmark)
 include(GoogleTest)
@@ -53,13 +43,8 @@ target_link_libraries(test_work_stealing_bench
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
-target_include_directories(test_work_stealing_bench PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_work_stealing_bench PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_work_stealing_bench)
 include(GoogleTest)
 gtest_discover_tests(test_work_stealing_bench)
@@ -72,15 +57,10 @@ target_link_libraries(test_io_stress
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
     target_link_libraries(test_io_stress PRIVATE ${LIBURING})
-endif()
-target_include_directories(test_io_stress PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_io_stress PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
 endif()
 sanitizer_add(test_io_stress)
 include(GoogleTest)
@@ -93,13 +73,8 @@ target_link_libraries(test_idle_degradation
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
-target_include_directories(test_idle_degradation PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_idle_degradation PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_idle_degradation)
 include(GoogleTest)
 gtest_discover_tests(test_idle_degradation)
@@ -112,15 +87,10 @@ target_link_libraries(test_longevity_online
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
     target_link_libraries(test_longevity_online PRIVATE ${LIBURING})
-endif()
-target_include_directories(test_longevity_online PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_longevity_online PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
 endif()
 sanitizer_add(test_longevity_online)
 include(GoogleTest)
@@ -133,13 +103,8 @@ target_link_libraries(test_longevity_offline
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
-target_include_directories(test_longevity_offline PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_longevity_offline PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_longevity_offline)
 include(GoogleTest)
 gtest_discover_tests(test_longevity_offline)
@@ -153,10 +118,6 @@ target_link_libraries(test_pool_bench
         GTest::gtest
         Threads::Threads
 )
-target_include_directories(test_pool_bench PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_pool_bench PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_pool_bench)
 include(GoogleTest)
 gtest_discover_tests(test_pool_bench)
@@ -171,13 +132,8 @@ target_link_libraries(test_longevity_mixed
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
-target_include_directories(test_longevity_mixed PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_longevity_mixed PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_longevity_mixed)
 include(GoogleTest)
 gtest_discover_tests(test_longevity_mixed)

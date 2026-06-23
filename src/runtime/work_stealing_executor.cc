@@ -273,6 +273,10 @@ void WorkStealingExecutor::worker_loop(WorkerState& ws) {
 
         // 1. Drain yield queue (coroutines that yielded back to this worker)
         if (ws.yield_queue->try_dequeue(item)) {
+            // NOTE: tls_source_queue is set to yield_queue so that yield() always
+            // returns the coroutine to the local worker. This is intentional for WSE:
+            // stolen tasks and global-entry tasks have no original source queue,
+            // so they yield back to the local yield_queue.
             tls_source_queue = ws.yield_queue.get();
             tls_source_queue_idx = SIZE_MAX;  // tell yield() to use tls_source_queue
             g_wse_tasks << 1;

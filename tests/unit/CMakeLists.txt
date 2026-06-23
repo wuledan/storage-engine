@@ -3,10 +3,6 @@
 # ---------------------------------------------------------------------------
 add_executable(unit_tests test_build.cpp)
 target_link_libraries(unit_tests PRIVATE GTest::gtest_main GTest::gtest)
-target_include_directories(unit_tests PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(unit_tests PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(unit_tests)
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
@@ -23,13 +19,8 @@ function(add_runtime_test TEST_NAME TEST_SOURCE)
             runtime
             GTest::gtest_main
             GTest::gtest
-            Folly::folly
             Threads::Threads
     )
-    target_include_directories(${TEST_NAME} PRIVATE ${FOLLY_INCLUDE_DIR})
-    if(FOLLY_BUILD_INCLUDE_DIR)
-        target_include_directories(${TEST_NAME} PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-    endif()
     sanitizer_add(${TEST_NAME})
     gtest_discover_tests(${TEST_NAME})
 endfunction()
@@ -86,14 +77,9 @@ target_link_libraries(test_work_stealing_deque
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
         atomic
 )
-target_include_directories(test_work_stealing_deque PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_work_stealing_deque PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_work_stealing_deque)
 gtest_discover_tests(test_work_stealing_deque)
 
@@ -104,14 +90,9 @@ target_link_libraries(test_work_stealing_executor
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
         atomic
 )
-target_include_directories(test_work_stealing_executor PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_work_stealing_executor PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_work_stealing_executor)
 gtest_discover_tests(test_work_stealing_executor)
 
@@ -123,13 +104,8 @@ target_link_libraries(test_io_types
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
-target_include_directories(test_io_types PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_io_types PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_io_types)
 gtest_discover_tests(test_io_types)
 
@@ -141,15 +117,10 @@ target_link_libraries(test_io_uring
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
     target_link_libraries(test_io_uring PRIVATE ${LIBURING})
-endif()
-target_include_directories(test_io_uring PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_io_uring PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
 endif()
 sanitizer_add(test_io_uring)
 gtest_discover_tests(test_io_uring)
@@ -162,7 +133,6 @@ target_link_libraries(test_io_backends
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
@@ -170,10 +140,6 @@ if(LIBURING)
 endif()
 if(LIBAIO)
     target_link_libraries(test_io_backends PRIVATE ${LIBAIO})
-endif()
-target_include_directories(test_io_backends PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_io_backends PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
 endif()
 sanitizer_add(test_io_backends)
 gtest_discover_tests(test_io_backends)
@@ -186,7 +152,6 @@ target_link_libraries(test_error_codes
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
@@ -194,10 +159,6 @@ if(LIBURING)
 endif()
 if(LIBAIO)
     target_link_libraries(test_error_codes PRIVATE ${LIBAIO})
-endif()
-target_include_directories(test_error_codes PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_error_codes PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
 endif()
 sanitizer_add(test_error_codes)
 gtest_discover_tests(test_error_codes)
@@ -210,15 +171,10 @@ target_link_libraries(test_batch_submit
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
     target_link_libraries(test_batch_submit PRIVATE ${LIBURING})
-endif()
-target_include_directories(test_batch_submit PRIVATE ${FOLLY_INCLUDE_DIR})
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_batch_submit PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
 endif()
 sanitizer_add(test_batch_submit)
 gtest_discover_tests(test_batch_submit)

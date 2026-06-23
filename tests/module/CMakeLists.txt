@@ -9,17 +9,12 @@ function(add_module_test TEST_NAME TEST_SOURCE)
             runtime
             GTest::gtest_main
             GTest::gtest
-            Folly::folly
             Threads::Threads
     )
     target_include_directories(${TEST_NAME}
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
-            ${FOLLY_INCLUDE_DIR}
     )
-    if(FOLLY_BUILD_INCLUDE_DIR)
-        target_include_directories(${TEST_NAME} PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-    endif()
     sanitizer_add(${TEST_NAME})
     include(GoogleTest)
     gtest_discover_tests(${TEST_NAME})
@@ -36,7 +31,6 @@ target_link_libraries(test_io_integration
         runtime
         GTest::gtest_main
         GTest::gtest
-        Folly::folly
         Threads::Threads
 )
 if(LIBURING)
@@ -45,11 +39,7 @@ endif()
 target_include_directories(test_io_integration
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${FOLLY_INCLUDE_DIR}
 )
-if(FOLLY_BUILD_INCLUDE_DIR)
-    target_include_directories(test_io_integration PRIVATE ${FOLLY_BUILD_INCLUDE_DIR})
-endif()
 sanitizer_add(test_io_integration)
 include(GoogleTest)
 gtest_discover_tests(test_io_integration)

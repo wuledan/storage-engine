@@ -83,16 +83,18 @@ struct TaskPromise : TaskPromiseBase {
         using PromiseT = TaskPromise<R>;
         struct FinalAwaiter {
             bool await_ready() noexcept { return false; }
-            void await_suspend(std::coroutine_handle<PromiseT> h) noexcept {
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<PromiseT> h) noexcept {
                 auto& promise = h.promise();
                 promise.completed_.store(true, std::memory_order_release);
                 if (promise.released_) {
                     h.destroy();
+                    return std::noop_coroutine();
                 } else if (promise.continuation_) {
                     auto cont = promise.continuation_;
                     promise.continuation_ = nullptr;
-                    cont.resume();
+                    return cont;
                 }
+                return std::noop_coroutine();
             }
             void await_resume() noexcept {}
         };
@@ -111,16 +113,18 @@ struct TaskPromise<void> : TaskPromiseBase {
         using PromiseT = TaskPromise<void>;
         struct FinalAwaiter {
             bool await_ready() noexcept { return false; }
-            void await_suspend(std::coroutine_handle<PromiseT> h) noexcept {
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<PromiseT> h) noexcept {
                 auto& promise = h.promise();
                 promise.completed_.store(true, std::memory_order_release);
                 if (promise.released_) {
                     h.destroy();
+                    return std::noop_coroutine();
                 } else if (promise.continuation_) {
                     auto cont = promise.continuation_;
                     promise.continuation_ = nullptr;
-                    cont.resume();
+                    return cont;
                 }
+                return std::noop_coroutine();
             }
             void await_resume() noexcept {}
         };
@@ -173,9 +177,9 @@ public:
     // ── co_await support ──
     bool await_ready() const noexcept { return !handle_; }
 
-    void await_suspend(std::coroutine_handle<> h) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
         handle_.promise().continuation_ = h;
-        handle_.resume();
+        return handle_;
     }
 
     R await_resume() {
